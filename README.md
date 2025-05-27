@@ -20,8 +20,8 @@ gosocialcheck update
 gosocialcheck run ./...
 ```
 
-This command checks whether the **dependencies** of the current module (`./...`) is used by trusted projects.
-This comman does not check whether the the current module itself is used by trusted projects.
+This command checks whether the **dependencies** of the current module (`./...`) are used by trusted projects.
+This command does not check whether the the current module itself is used by trusted projects.
 
 Example output:
 ```
