@@ -1,6 +1,8 @@
 package run
 
 import (
+	"os"
+
 	"github.com/spf13/cobra"
 	"golang.org/x/tools/go/analysis/singlechecker"
 
@@ -20,6 +22,15 @@ func New() *cobra.Command {
 }
 
 func action(cmd *cobra.Command, args []string) error {
+	// Rewrite the global os.Args, as a workaround for:
+	// - https://github.com/AkihiroSuda/gosocialcheck/issues/1
+	// - https://github.com/golang/go/issues/73875
+	//
+	// golang.org/x/tools/go/analysis/singlechecker parses the global args
+	// rather than flag.FlagSet.Args, and raises an error:
+	// `-: package run is not in std (/opt/homebrew/Cellar/go/1.24.3/libexec/src/run`
+	os.Args = append([]string{"gosocialcheck-run"}, args...)
+
 	ctx := cmd.Context()
 	c, err := cache.New()
 	if err != nil {
