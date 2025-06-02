@@ -10,15 +10,17 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"reflect"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
 	"golang.org/x/tools/go/analysis"
 
 	"github.com/AkihiroSuda/gosocialcheck/pkg/cache"
+	"github.com/AkihiroSuda/gosocialcheck/pkg/modpath"
 )
 
 type Opts struct {
@@ -27,26 +29,39 @@ type Opts struct {
 }
 
 func New(ctx context.Context, opts Opts) (*analysis.Analyzer, error) {
-	if !reflect.DeepEqual(opts.Flags.Args(), []string{"./..."}) {
-		// because only go.{mod,sum} in the current directories are supported
-		return nil, errors.New("currently the argument must be './...' (FIXME)")
+	inst := &instance{
+		Opts:    opts,
+		modDirs: make(map[string]string),
 	}
 	a := &analysis.Analyzer{
 		Name:             "gosocialcheck",
 		Doc:              "Social reputation checker",
 		URL:              "https://github.com/AkihiroSuda/gosocialcheck",
 		Flags:            opts.Flags,
-		Run:              run(ctx, opts),
+		Run:              run(ctx, inst),
 		RunDespiteErrors: false,
 	}
 	return a, nil
 }
 
-func run(ctx context.Context, opts Opts) func(*analysis.Pass) (any, error) {
+type instance struct {
+	Opts
+	modDirs map[string]string // key: MODULE@VER
+	mu      sync.RWMutex
+}
+
+func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) {
 	return func(pass *analysis.Pass) (any, error) {
+		modDir, err := inst.guessModuleDir(pass)
+		if err != nil {
+			return nil, err
+		}
+		if modDir == "" {
+			return nil, nil
+		}
 		// TODO: cache go.mod
 		// TODO: support multi-module mono repo
-		goModFilename := "go.mod"
+		goModFilename := filepath.Join(modDir, "go.mod")
 		// pass.ReadFile does not support go.mod
 		goModB, err := os.ReadFile(goModFilename)
 		if err != nil {
@@ -64,7 +79,7 @@ func run(ctx context.Context, opts Opts) func(*analysis.Pass) (any, error) {
 		}
 
 		// TODO: cache go.sum
-		goSumFilename := "go.sum"
+		goSumFilename := filepath.Join(modDir, "go.sum")
 		// pass.ReadFile does not support go.sum
 		goSumB, err := os.ReadFile(goSumFilename)
 		if err != nil {
@@ -91,7 +106,7 @@ func run(ctx context.Context, opts Opts) func(*analysis.Pass) (any, error) {
 				}
 				h1 := goSum[modV.Path+" "+modV.Version]
 				slog.DebugContext(ctx, "module", "path", p, "modpath", modV.Path, "modver", modV.Version, "h1", h1)
-				hit, err := opts.Cache.Lookup(ctx, h1)
+				hit, err := inst.Opts.Cache.Lookup(ctx, h1)
 				if err != nil {
 					return nil, err
 				}
@@ -136,4 +151,54 @@ func parseGoSum(r io.Reader) (map[string]string, error) {
 		res[fields[0]+" "+fields[1]] = fields[2]
 	}
 	return res, sc.Err()
+}
+
+// guessModuleDir guess the directory that contains go.mod and go.sum.
+// This function might not be robust.
+//
+// A workaround for https://github.com/golang/go/issues/73878
+func (inst *instance) guessModuleDir(pass *analysis.Pass) (string, error) {
+	if pass.Module == nil {
+		return "", errors.New("got nil module")
+	}
+	mod := pass.Module.Path
+	modVer := pass.Module.Version
+	inst.mu.RLock()
+	k := mod
+	if modVer != "" {
+		k += "@" + modVer
+	}
+	v := inst.modDirs[k]
+	inst.mu.RUnlock()
+	if v != "" {
+		return v, nil
+	}
+	if len(pass.Files) == 0 {
+		return "", fmt.Errorf("%s: got no files", mod)
+	}
+	var sawGoBuildDir bool
+	for _, f := range pass.Files {
+		ff := pass.Fset.File(f.Pos())
+		file := ff.Name()
+		fileSlash := filepath.ToSlash(file)
+		if strings.Contains(fileSlash, "/go-build/") {
+			// tmp file like /Users/suda/Library/Caches/go-build/a0/a0f5d4693b09f2e3e24d18608f43e8540c5c52248877ef966df196f36bed5dfb-d
+			sawGoBuildDir = true
+		}
+		if strings.Contains(fileSlash, modpath.StripMajorVersion(mod)) {
+			dir, err := modpath.DirFromFileAndMod(file, mod, modVer)
+			if err != nil {
+				return "", err
+			}
+			slog.Debug("guessed module dir", "mod", mod, "modVer", modVer, "dir", dir)
+			inst.mu.Lock()
+			inst.modDirs[k] = dir
+			inst.mu.Unlock()
+			return dir, nil
+		}
+	}
+	if sawGoBuildDir {
+		return "", nil
+	}
+	return "", fmt.Errorf("could not guess the directory of module %s", k)
 }
