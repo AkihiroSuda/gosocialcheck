@@ -8,9 +8,9 @@ require (
 	github.com/lmittmann/tint v1.1.2 // gomodjail:unconfined
 	github.com/spf13/cobra v1.10.1 // gomodjail:unconfined
 	github.com/spf13/pflag v1.0.10
-	golang.org/x/mod v0.29.0
-	golang.org/x/sync v0.17.0 // gomodjail:unconfined
-	golang.org/x/tools v0.38.0 // gomodjail:unconfined
+	golang.org/x/mod v0.30.0
+	golang.org/x/sync v0.18.0 // gomodjail:unconfined
+	golang.org/x/tools v0.39.0 // gomodjail:unconfined
 	gopkg.in/yaml.v3 v3.0.1
 	gotest.tools/v3 v3.5.2
 )
