@@ -37,7 +37,7 @@ import 'github.com/lmittmann/tint': module 'github.com/lmittmann/tint@v1.0.7' do
 ### GitHub API rate limit
 gosocialcheck uses the GitHub API for the following operations:
 - Fetch git tags, via `api.github.com`.
-- Fetch `go.mod` and `go.sum`, via `http://raw.githubusercontent.com`.
+- Fetch `go.mod` and `go.sum`, via `https://raw.githubusercontent.com`.
 
 These API calls often fails unless the API token is set.
 
