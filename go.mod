@@ -6,7 +6,7 @@ go 1.24.0
 
 require (
 	github.com/lmittmann/tint v1.1.2 // gomodjail:unconfined
-	github.com/spf13/cobra v1.10.1 // gomodjail:unconfined
+	github.com/spf13/cobra v1.10.2 // gomodjail:unconfined
 	github.com/spf13/pflag v1.0.10
 	golang.org/x/mod v0.31.0
 	golang.org/x/sync v0.19.0 // gomodjail:unconfined
