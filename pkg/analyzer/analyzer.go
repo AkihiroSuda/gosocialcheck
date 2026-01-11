@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
@@ -30,8 +29,8 @@ type Opts struct {
 
 func New(ctx context.Context, opts Opts) (*analysis.Analyzer, error) {
 	inst := &instance{
-		Opts:    opts,
-		modDirs: make(map[string]string),
+		Opts:   opts,
+		gusser: modpath.NewGuesser(),
 	}
 	a := &analysis.Analyzer{
 		Name:             "gosocialcheck",
@@ -46,13 +45,12 @@ func New(ctx context.Context, opts Opts) (*analysis.Analyzer, error) {
 
 type instance struct {
 	Opts
-	modDirs map[string]string // key: MODULE@VER
-	mu      sync.RWMutex
+	gusser *modpath.Guesser
 }
 
 func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) {
 	return func(pass *analysis.Pass) (any, error) {
-		modDir, err := inst.guessModuleDir(pass)
+		modDir, err := inst.gusser.GuessModuleDir(pass)
 		if err != nil {
 			return nil, err
 		}
@@ -151,54 +149,4 @@ func parseGoSum(r io.Reader) (map[string]string, error) {
 		res[fields[0]+" "+fields[1]] = fields[2]
 	}
 	return res, sc.Err()
-}
-
-// guessModuleDir guess the directory that contains go.mod and go.sum.
-// This function might not be robust.
-//
-// A workaround for https://github.com/golang/go/issues/73878
-func (inst *instance) guessModuleDir(pass *analysis.Pass) (string, error) {
-	if pass.Module == nil {
-		return "", errors.New("got nil module")
-	}
-	mod := pass.Module.Path
-	modVer := pass.Module.Version
-	inst.mu.RLock()
-	k := mod
-	if modVer != "" {
-		k += "@" + modVer
-	}
-	v := inst.modDirs[k]
-	inst.mu.RUnlock()
-	if v != "" {
-		return v, nil
-	}
-	if len(pass.Files) == 0 {
-		return "", fmt.Errorf("%s: got no files", mod)
-	}
-	var sawGoBuildDir bool
-	for _, f := range pass.Files {
-		ff := pass.Fset.File(f.Pos())
-		file := ff.Name()
-		fileSlash := filepath.ToSlash(file)
-		if strings.Contains(fileSlash, "/go-build/") {
-			// tmp file like /Users/suda/Library/Caches/go-build/a0/a0f5d4693b09f2e3e24d18608f43e8540c5c52248877ef966df196f36bed5dfb-d
-			sawGoBuildDir = true
-		}
-		if strings.Contains(fileSlash, modpath.StripMajorVersion(mod)) {
-			dir, err := modpath.DirFromFileAndMod(file, mod, modVer)
-			if err != nil {
-				return "", err
-			}
-			slog.Debug("guessed module dir", "mod", mod, "modVer", modVer, "dir", dir)
-			inst.mu.Lock()
-			inst.modDirs[k] = dir
-			inst.mu.Unlock()
-			return dir, nil
-		}
-	}
-	if sawGoBuildDir {
-		return "", nil
-	}
-	return "", fmt.Errorf("could not guess the directory of module %s", k)
 }
