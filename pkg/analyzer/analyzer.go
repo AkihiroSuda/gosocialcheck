@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
@@ -46,8 +47,9 @@ func New(ctx context.Context, opts Opts) (*analysis.Analyzer, error) {
 
 type instance struct {
 	Opts
-	gusser        *modpath.Guesser
-	processedSums map[string]struct{}
+	gusser          *modpath.Guesser
+	processedSums   map[string]struct{}
+	processedSumsMu sync.RWMutex
 }
 
 func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) {
@@ -101,10 +103,15 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 					continue
 				}
 				h1 := goSum[modV.Path+" "+modV.Version]
-				if _, ok := inst.processedSums[h1]; ok {
+				inst.processedSumsMu.RLock()
+				_, h1Processed := inst.processedSums[h1]
+				inst.processedSumsMu.RUnlock()
+				if h1Processed {
 					continue
 				}
+				inst.processedSumsMu.Lock()
 				inst.processedSums[h1] = struct{}{}
+				inst.processedSumsMu.Unlock()
 				slog.DebugContext(ctx, "module", "path", p, "modpath", modV.Path, "modver", modV.Version, "h1", h1)
 				hit, err := inst.Opts.Cache.Lookup(ctx, h1)
 				if err != nil {
