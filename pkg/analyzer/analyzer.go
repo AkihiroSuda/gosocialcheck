@@ -29,8 +29,9 @@ type Opts struct {
 
 func New(ctx context.Context, opts Opts) (*analysis.Analyzer, error) {
 	inst := &instance{
-		Opts:   opts,
-		gusser: modpath.NewGuesser(),
+		Opts:          opts,
+		gusser:        modpath.NewGuesser(),
+		processedSums: make(map[string]struct{}),
 	}
 	a := &analysis.Analyzer{
 		Name:             "gosocialcheck",
@@ -45,7 +46,8 @@ func New(ctx context.Context, opts Opts) (*analysis.Analyzer, error) {
 
 type instance struct {
 	Opts
-	gusser *modpath.Guesser
+	gusser        *modpath.Guesser
+	processedSums map[string]struct{}
 }
 
 func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) {
@@ -99,6 +101,10 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 					continue
 				}
 				h1 := goSum[modV.Path+" "+modV.Version]
+				if _, ok := inst.processedSums[h1]; ok {
+					continue
+				}
+				inst.processedSums[h1] = struct{}{}
 				slog.DebugContext(ctx, "module", "path", p, "modpath", modV.Path, "modver", modV.Version, "h1", h1)
 				hit, err := inst.Opts.Cache.Lookup(ctx, h1)
 				if err != nil {
