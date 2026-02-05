@@ -72,10 +72,6 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 		if goMod.Module.Mod.Path != pass.Module.Path {
 			return nil, fmt.Errorf("%s: expected %q, got %q", goModFilename, pass.Module.Path, goMod.Module.Mod.Path)
 		}
-		if len(goMod.Replace) != 0 {
-			slog.WarnContext(ctx, "replace is not supported yet")
-		}
-
 		// TODO: cache go.sum
 		goSumFilename := filepath.Join(modDir, "go.sum")
 		// pass.ReadFile does not support go.sum
@@ -127,13 +123,36 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 }
 
 func moduleVersion(goMod *modfile.File, imp string) *module.Version {
+	// Find the require entry for this import
+	var reqMod *module.Version
 	for _, r := range goMod.Require {
 		// TODO: check multiple matches
 		if r.Mod.Path == imp || strings.HasPrefix(imp, r.Mod.Path+"/") {
-			return &r.Mod
+			reqMod = &r.Mod
+			break
 		}
 	}
-	return nil
+	if reqMod == nil {
+		return nil
+	}
+
+	// Check for replace directive
+	for _, r := range goMod.Replace {
+		// Match if: same path AND (replace has no version OR versions match)
+		if r.Old.Path == reqMod.Path && (r.Old.Version == "" || r.Old.Version == reqMod.Version) {
+			// Local path replacements have no go.sum entry
+			if isLocalPath(r.New.Path) {
+				return nil
+			}
+			return &r.New
+		}
+	}
+
+	return reqMod
+}
+
+func isLocalPath(path string) bool {
+	return strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../") || strings.HasPrefix(path, "/")
 }
 
 func parseGoSum(r io.Reader) (map[string]string, error) {
