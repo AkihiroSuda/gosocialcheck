@@ -5,7 +5,7 @@ module github.com/AkihiroSuda/gosocialcheck
 go 1.24.0
 
 require (
-	github.com/lmittmann/tint v1.1.2 // gomodjail:unconfined
+	github.com/lmittmann/tint v1.1.3 // gomodjail:unconfined
 	github.com/spf13/cobra v1.10.2 // gomodjail:unconfined
 	github.com/spf13/pflag v1.0.10
 	golang.org/x/mod v0.32.0
