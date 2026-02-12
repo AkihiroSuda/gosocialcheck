@@ -34,6 +34,28 @@ import 'github.com/lmittmann/tint': module 'github.com/lmittmann/tint@v1.0.7' do
 ```
 
 ## Hints
+### Allowlist
+
+Use `//gosocialcheck:trusted` [directives](https://github.com/AkihiroSuda/gomoddirectivecomments) in `go.mod` to silence alerts for trustworthy modules.
+
+e.g.,
+```go-module
+//gosocialcheck:trusted
+require (
+	golang.org/x/sync v0.19.0
+)
+```
+
+or
+
+```go-module
+require (
+	golang.org/x/sync v0.19.0 //gosocialcheck:trusted
+)
+```
+
+Note: The directive ignores the module version.
+
 ### GitHub API rate limit
 gosocialcheck uses the GitHub API for the following operations:
 - Fetch git tags, via `api.github.com`.
