@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 
+	gomoddirectivecomments "github.com/AkihiroSuda/gomoddirectivecomments"
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
 	"golang.org/x/tools/go/analysis"
@@ -27,6 +28,11 @@ type Opts struct {
 	Flags flag.FlagSet
 	Cache *cache.Cache
 }
+
+const (
+	directivePolicyUntrusted = "untrusted"
+	directivePolicyTrusted   = "trusted"
+)
 
 func New(ctx context.Context, opts Opts) (*analysis.Analyzer, error) {
 	inst := &instance{
@@ -76,6 +82,10 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 		if goMod.Module.Mod.Path != pass.Module.Path {
 			return nil, fmt.Errorf("%s: expected %q, got %q", goModFilename, pass.Module.Path, goMod.Module.Mod.Path)
 		}
+		policies, err := gomoddirectivecomments.Parse(goMod, "gosocialcheck", directivePolicyUntrusted)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse gosocialcheck directives in %q: %w", goModFilename, err)
+		}
 		// TODO: cache go.sum
 		goSumFilename := filepath.Join(modDir, "go.sum")
 		// pass.ReadFile does not support go.sum
@@ -100,6 +110,10 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 				modV := moduleVersion(goMod, p)
 				if modV == nil {
 					slog.DebugContext(ctx, "module entry not found (negligible for stdlib and local imports)", "path", p)
+					continue
+				}
+				if policies[modV.Path] == directivePolicyTrusted {
+					slog.DebugContext(ctx, "module marked as trusted via gosocialcheck:trusted directive", "path", modV.Path)
 					continue
 				}
 				h1 := goSum[modV.Path+" "+modV.Version]
