@@ -193,6 +193,26 @@ func filterPrelease(tags []github.Tag) []github.Tag {
 	return res
 }
 
+// dedupTagsBySHA deduplicates tags that point to the same commit SHA.
+// When multiple tags share a SHA, the one with the lexicographically
+// smallest name is kept, so the result is deterministic regardless of
+// the input order returned by the GitHub API.
+func dedupTagsBySHA(tags []github.Tag) []github.Tag {
+	idx := make(map[string]int, len(tags))
+	res := make([]github.Tag, 0, len(tags))
+	for _, t := range tags {
+		if i, ok := idx[t.Commit.SHA]; ok {
+			if t.Name < res[i].Name {
+				res[i] = t
+			}
+			continue
+		}
+		idx[t.Commit.SHA] = len(res)
+		res = append(res, t)
+	}
+	return res
+}
+
 // updateGitHubRepo expects url to be "https://github.com/<ORG>/<REPO>".
 func (c *Cache) updateGitHubRepo(ctx context.Context, urlStr, category string) error {
 	repo, err := github.NewRepo(urlStr)
@@ -204,6 +224,7 @@ func (c *Cache) updateGitHubRepo(ctx context.Context, urlStr, category string) e
 		return err
 	}
 	tags = filterPrelease(tags)
+	tags = dedupTagsBySHA(tags)
 	const maxTags = 10
 	if len(tags) > maxTags {
 		tags = tags[:maxTags]
