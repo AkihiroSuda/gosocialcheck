@@ -121,7 +121,8 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 					slog.DebugContext(ctx, "module marked as trusted via gosocialcheck:trusted directive", "path", modV.Path)
 					continue
 				}
-				h1 := goSum[modV.Path+" "+modV.Version]
+				goSumE := goSum[modV.Path+" "+modV.Version]
+				h1 := goSumE.H1
 				inst.processedSumsMu.RLock()
 				_, h1Processed := inst.processedSums[h1]
 				inst.processedSumsMu.RUnlock()
@@ -145,6 +146,14 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 							pass.Fset.Position(imp.Pos()),
 							pass.Fset.Position(imp.End()),
 							msg)
+						if goSumE.Line > 0 {
+							sumPosn := token.Position{
+								Filename: goSumFilename,
+								Line:     goSumE.Line,
+								Column:   1,
+							}
+							emitGHAWarning(inst.cwd, sumPosn, sumPosn, msg)
+						}
 					} else {
 						pass.Report(analysis.Diagnostic{
 							Pos:     imp.Pos(),
@@ -227,17 +236,24 @@ func emitGHAWarning(cwd string, posn, endPosn token.Position, msg string) {
 	)
 }
 
-func parseGoSum(r io.Reader) (map[string]string, error) {
+type goSumEntry struct {
+	H1   string
+	Line int // 1-based line number in go.sum
+}
+
+func parseGoSum(r io.Reader) (map[string]goSumEntry, error) {
 	sc := bufio.NewScanner(r)
-	res := make(map[string]string)
+	res := make(map[string]goSumEntry)
+	lineNo := 0
 	for sc.Scan() {
+		lineNo++
 		line := sc.Text()
 		line = strings.TrimSpace(line)
 		fields := strings.Fields(line)
 		if len(fields) != 3 {
 			return res, fmt.Errorf("expected 3 fields, got %v", fields)
 		}
-		res[fields[0]+" "+fields[1]] = fields[2]
+		res[fields[0]+" "+fields[1]] = goSumEntry{H1: fields[2], Line: lineNo}
 	}
 	return res, sc.Err()
 }
