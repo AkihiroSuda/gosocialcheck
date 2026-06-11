@@ -2,7 +2,7 @@
 // gomodjail:confined
 module github.com/AkihiroSuda/gosocialcheck
 
-go 1.24.0
+go 1.25
 
 // My own packages and golang.org/x packages are trusted
 //gosocialcheck:trusted
