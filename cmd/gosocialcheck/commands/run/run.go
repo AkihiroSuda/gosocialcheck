@@ -1,10 +1,6 @@
 package run
 
 import (
-	"errors"
-	"fmt"
-	"io/fs"
-	"log/slog"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -13,7 +9,6 @@ import (
 	"github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck/flagutil"
 	"github.com/AkihiroSuda/gosocialcheck/pkg/analyzer"
 	"github.com/AkihiroSuda/gosocialcheck/pkg/cache"
-	"github.com/AkihiroSuda/gosocialcheck/pkg/embeddeddb"
 )
 
 func New() *cobra.Command {
@@ -37,27 +32,12 @@ func action(cmd *cobra.Command, args []string) error {
 	os.Args = append([]string{"gosocialcheck-run"}, args...)
 
 	ctx := cmd.Context()
-	embFS, err := embeddeddb.FS()
-	if err != nil {
-		return err
-	}
-	c, err := cache.New(cache.WithExtraFS(embFS))
+	c, err := cache.New()
 	if err != nil {
 		return err
 	}
 	if _, err = c.LastUpdated(); err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
-		embEmpty, embErr := embeddeddb.IsEmpty()
-		if embErr != nil {
-			return embErr
-		}
-		if embEmpty {
-			return fmt.Errorf("the database is not populated yet (hint: run `gosocialcheck update`): %w", err)
-		}
-		slog.WarnContext(ctx, "The local database is not populated yet; falling back to the database that was embedded in the binary at build time. "+
-			"Run `gosocialcheck update` to fetch the latest database.")
+		return err
 	}
 	flags := cmd.Flags()
 	goflags := flagutil.PFlagSetToGoFlagSet(flags, []string{"debug"})
