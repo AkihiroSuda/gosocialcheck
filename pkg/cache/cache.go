@@ -55,7 +55,6 @@ func DefaultProgressEventHandler(ctx context.Context, ev ProgressEvent) {
 
 type opts struct {
 	dir        string
-	extraFS    fs.FS
 	onProgress ProgressEventHandler
 	httpClient *http.Client
 }
@@ -65,16 +64,6 @@ type Opt func(*opts) error
 func WithDir(dir string) Opt {
 	return func(opts *opts) error {
 		opts.dir = dir
-		return nil
-	}
-}
-
-// WithExtraFS adds an extra read-only database with the same layout as the
-// cache directory, such as [github.com/AkihiroSuda/gosocialcheck/pkg/embeddeddb.FS].
-// Entries found in the extra database are merged into the [Cache.Lookup] results.
-func WithExtraFS(fsys fs.FS) Opt {
-	return func(opts *opts) error {
-		opts.extraFS = fsys
 		return nil
 	}
 }
@@ -114,15 +103,11 @@ func New(o ...Opt) (*Cache, error) {
 	if c.opts.httpClient == nil {
 		c.opts.httpClient = http.DefaultClient
 	}
-	if c.opts.extraFS != nil {
-		c.extra = &fsDB{fsys: c.opts.extraFS}
-	}
 	return &c, nil
 }
 
 type Cache struct {
 	opts
-	extra   *fsDB
 	updated []string
 }
 
@@ -289,28 +274,6 @@ func (c *Cache) Lookup(ctx context.Context, sum string) ([]Meta, error) {
 	if !strings.HasPrefix(sum, "h1:") || !strings.HasSuffix(sum, "=") {
 		return nil, fmt.Errorf("expected h1 sum, got %q", sum)
 	}
-	res, err := c.lookupDir(ctx, sum)
-	if err != nil {
-		return res, err
-	}
-	if c.extra != nil {
-		extra, err := c.extra.lookup(sum)
-		if err != nil {
-			return res, err
-		}
-		res = mergeMetas(res, extra)
-	}
-	return res, nil
-}
-
-func (c *Cache) lookupDir(ctx context.Context, sum string) ([]Meta, error) {
-	if _, err := os.Stat(c.dir); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			// The cache directory does not exist on the first run.
-			return nil, nil
-		}
-		return nil, err
-	}
 	goSumFiles, err := c.lookupGoSumFiles(ctx, sum)
 	if err != nil {
 		return nil, err
@@ -330,22 +293,6 @@ func (c *Cache) lookupDir(ctx context.Context, sum string) ([]Meta, error) {
 		res = append(res, m)
 	}
 	return res, nil
-}
-
-func mergeMetas(metas ...[]Meta) []Meta {
-	var res []Meta
-	seen := make(map[string]struct{})
-	for _, mm := range metas {
-		for _, m := range mm {
-			key := m.Repo.Owner + "/" + m.Repo.Repo + "@" + m.Tag.Commit.SHA
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			res = append(res, m)
-		}
-	}
-	return res
 }
 
 func (c *Cache) lookupGoSumFiles(ctx context.Context, sum string) ([]string, error) {

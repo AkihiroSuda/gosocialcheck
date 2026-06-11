@@ -31,11 +31,12 @@ func main() {
 }
 
 const example = `
-  gosocialcheck run ./...
-
-  # Optional: fetch the latest database (see README.md for $GITHUB_TOKEN)
+  # Set the token if facing the GitHub API rate limit (see README.md)
   export GITHUB_TOKEN=...
+
   gosocialcheck update
+
+  gosocialcheck run ./...
 `
 
 func newRootCommand() *cobra.Command {
