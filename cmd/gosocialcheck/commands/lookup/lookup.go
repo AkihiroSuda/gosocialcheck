@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck/cacheopt"
 	"github.com/AkihiroSuda/gosocialcheck/pkg/cache"
 )
 
@@ -22,7 +23,11 @@ func New() *cobra.Command {
 func action(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	sum := args[0]
-	c, err := cache.New()
+	cacheOpts, err := cacheopt.FromCommand(cmd)
+	if err != nil {
+		return err
+	}
+	c, err := cache.New(cacheOpts...)
 	if err != nil {
 		return err
 	}

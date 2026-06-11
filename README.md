@@ -56,6 +56,28 @@ require (
 
 Note: The directive ignores the module version.
 
+### Cache
+
+`gosocialcheck` keeps two cache flavors under `$XDG_CACHE_HOME/gosocialcheck`
+(`~/Library/Caches/gosocialcheck` on macOS):
+
+- `_remote`: a shallow clone of [`AkihiroSuda/gosocialcheck-cache`](https://github.com/AkihiroSuda/gosocialcheck-cache),
+  preprocessed and ready to use.
+- `_local`: rebuilt locally from the CNCF project list and the GitHub API
+  (`gosocialcheck update --cache-mode=local`).
+
+The `--cache-mode` flag (or `$GOSOCIALCHECK_CACHE_MODE`) selects which one is used:
+
+- `auto` (default): for reads, picks whichever has the more recent `ModTime`.
+  For `update`, fetches the remote.
+- `remote`: use the preprocessed remote cache.
+- `local`: rebuild and use the local cache.
+
+`gosocialcheck run` populates the cache automatically on the first run.
+
+Run `gosocialcheck info` (or `gosocialcheck info --json`) to inspect the
+current cache state.
+
 ### GitHub API rate limit
 gosocialcheck uses the GitHub API for the following operations:
 - Fetch git tags, via `api.github.com`.

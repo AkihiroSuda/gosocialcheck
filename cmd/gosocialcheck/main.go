@@ -8,11 +8,13 @@ import (
 	"github.com/lmittmann/tint"
 	"github.com/spf13/cobra"
 
+	"github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck/commands/info"
 	"github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck/commands/lookup"
 	"github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck/commands/run"
 	"github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck/commands/update"
 	"github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck/envutil"
 	"github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck/version"
+	"github.com/AkihiroSuda/gosocialcheck/pkg/cache"
 )
 
 var logLevel = new(slog.LevelVar)
@@ -52,10 +54,17 @@ func newRootCommand() *cobra.Command {
 
 	flags := cmd.PersistentFlags()
 	flags.Bool("debug", envutil.Bool("DEBUG", false), "debug mode [$DEBUG]")
+	flags.String("cache-mode",
+		envutil.String("GOSOCIALCHECK_CACHE_MODE", string(cache.ModeAuto)),
+		`cache mode ("auto", "remote", or "local") [$GOSOCIALCHECK_CACHE_MODE]`)
 	cmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		flags := cmd.Flags()
 		if debug, _ := flags.GetBool("debug"); debug {
 			logLevel.Set(slog.LevelDebug)
+		}
+		cacheMode, _ := flags.GetString("cache-mode")
+		if _, err := cache.ParseMode(cacheMode); err != nil {
+			return err
 		}
 		return nil
 	}
@@ -64,6 +73,7 @@ func newRootCommand() *cobra.Command {
 		update.New(),
 		lookup.New(),
 		run.New(),
+		info.New(),
 	)
 	return cmd
 }

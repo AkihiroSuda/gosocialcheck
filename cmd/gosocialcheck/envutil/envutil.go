@@ -9,6 +9,13 @@ import (
 	"log/slog"
 )
 
+func String(envName, defaultValue string) string {
+	if v, ok := os.LookupEnv(envName); ok {
+		return v
+	}
+	return defaultValue
+}
+
 func Bool(envName string, defaultValue bool) bool {
 	v, ok := os.LookupEnv(envName)
 	if !ok {

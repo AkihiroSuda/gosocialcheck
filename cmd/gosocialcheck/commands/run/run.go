@@ -1,11 +1,14 @@
 package run
 
 import (
+	"context"
+	"log/slog"
 	"os"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/tools/go/analysis/singlechecker"
 
+	"github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck/cacheopt"
 	"github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck/flagutil"
 	"github.com/AkihiroSuda/gosocialcheck/pkg/analyzer"
 	"github.com/AkihiroSuda/gosocialcheck/pkg/cache"
@@ -32,15 +35,23 @@ func action(cmd *cobra.Command, args []string) error {
 	os.Args = append([]string{"gosocialcheck-run"}, args...)
 
 	ctx := cmd.Context()
-	c, err := cache.New()
+	cacheOpts, err := cacheopt.FromCommand(cmd)
 	if err != nil {
 		return err
 	}
-	if _, err = c.LastUpdated(); err != nil {
+	onProgress := func(ctx context.Context, ev cache.ProgressEvent) {
+		slog.InfoContext(ctx, "progress: "+ev.Message)
+	}
+	cacheOpts = append(cacheOpts, cache.WithProgressEventHandler(onProgress))
+	c, err := cache.New(cacheOpts...)
+	if err != nil {
+		return err
+	}
+	if err = c.EnsureUpdated(ctx); err != nil {
 		return err
 	}
 	flags := cmd.Flags()
-	goflags := flagutil.PFlagSetToGoFlagSet(flags, []string{"debug"})
+	goflags := flagutil.PFlagSetToGoFlagSet(flags, []string{"debug", "cache-mode"})
 	if err := goflags.Parse(args); err != nil {
 		return err
 	}
