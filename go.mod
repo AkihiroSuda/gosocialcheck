@@ -2,15 +2,15 @@
 // gomodjail:confined
 module github.com/AkihiroSuda/gosocialcheck
 
-go 1.25
+go 1.25.0
 
 // My own packages and golang.org/x packages are trusted
 //gosocialcheck:trusted
 require (
 	github.com/AkihiroSuda/gomoddirectivecomments v0.1.0
-	golang.org/x/mod v0.33.0
-	golang.org/x/sync v0.19.0 // gomodjail:unconfined
-	golang.org/x/tools v0.41.0 // gomodjail:unconfined
+	golang.org/x/mod v0.36.0
+	golang.org/x/sync v0.20.0 // gomodjail:unconfined
+	golang.org/x/tools v0.45.0 // gomodjail:unconfined
 )
 
 require (
