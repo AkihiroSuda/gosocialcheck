@@ -21,7 +21,6 @@ import (
 	"golang.org/x/tools/go/analysis"
 
 	"github.com/AkihiroSuda/gosocialcheck/pkg/cache"
-	"github.com/AkihiroSuda/gosocialcheck/pkg/modpath"
 )
 
 type Opts struct {
@@ -37,7 +36,6 @@ const (
 func New(ctx context.Context, opts Opts) (*analysis.Analyzer, error) {
 	inst := &instance{
 		Opts:          opts,
-		gusser:        modpath.NewGuesser(),
 		processedSums: make(map[string]struct{}),
 	}
 	a := &analysis.Analyzer{
@@ -53,23 +51,18 @@ func New(ctx context.Context, opts Opts) (*analysis.Analyzer, error) {
 
 type instance struct {
 	Opts
-	gusser          *modpath.Guesser
 	processedSums   map[string]struct{}
 	processedSumsMu sync.RWMutex
 }
 
 func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) {
 	return func(pass *analysis.Pass) (any, error) {
-		modDir, err := inst.gusser.GuessModuleDir(pass)
-		if err != nil {
-			return nil, err
-		}
-		if modDir == "" {
-			return nil, nil
-		}
 		// TODO: cache go.mod
 		// TODO: support multi-module mono repo
-		goModFilename := filepath.Join(modDir, "go.mod")
+		goModFilename := pass.Module.GoMod
+		if goModFilename == "" {
+			return nil, nil
+		}
 		// pass.ReadFile does not support go.mod
 		goModB, err := os.ReadFile(goModFilename)
 		if err != nil {
@@ -87,7 +80,7 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 			return nil, fmt.Errorf("failed to parse gosocialcheck directives in %q: %w", goModFilename, err)
 		}
 		// TODO: cache go.sum
-		goSumFilename := filepath.Join(modDir, "go.sum")
+		goSumFilename := filepath.Join(filepath.Dir(goModFilename), "go.sum")
 		// pass.ReadFile does not support go.sum
 		goSumB, err := os.ReadFile(goSumFilename)
 		if err != nil {
