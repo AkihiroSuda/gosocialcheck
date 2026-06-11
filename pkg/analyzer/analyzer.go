@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"go/token"
 	"io"
 	"log/slog"
 	"os"
@@ -26,6 +27,11 @@ import (
 type Opts struct {
 	Flags flag.FlagSet
 	Cache *cache.Cache
+	// GHA emits diagnostics as GitHub Actions workflow commands on stdout
+	// instead of via [analysis.Pass.Report], so the process exits 0 even
+	// when there are findings. See:
+	// https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands
+	GHA bool
 }
 
 const (
@@ -34,9 +40,14 @@ const (
 )
 
 func New(ctx context.Context, opts Opts) (*analysis.Analyzer, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
 	inst := &instance{
 		Opts:          opts,
 		processedSums: make(map[string]struct{}),
+		cwd:           cwd,
 	}
 	a := &analysis.Analyzer{
 		Name:             "gosocialcheck",
@@ -53,6 +64,7 @@ type instance struct {
 	Opts
 	processedSums   map[string]struct{}
 	processedSumsMu sync.RWMutex
+	cwd             string
 }
 
 func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) {
@@ -109,7 +121,8 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 					slog.DebugContext(ctx, "module marked as trusted via gosocialcheck:trusted directive", "path", modV.Path)
 					continue
 				}
-				h1 := goSum[modV.Path+" "+modV.Version]
+				goSumE := goSum[modV.Path+" "+modV.Version]
+				h1 := goSumE.H1
 				inst.processedSumsMu.RLock()
 				_, h1Processed := inst.processedSums[h1]
 				inst.processedSumsMu.RUnlock()
@@ -125,14 +138,29 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 					return nil, err
 				}
 				if len(hit) == 0 {
-					diag := analysis.Diagnostic{
-						Pos: imp.Pos(),
-						End: imp.End(),
-						Message: fmt.Sprintf("import '%s': module '%s' does not seem adopted by a trusted project "+
-							"(negligible if you trust the module)",
-							p, modV.String()),
+					msg := fmt.Sprintf("import '%s': module '%s' does not seem adopted by a trusted project "+
+						"(negligible if you trust the module)",
+						p, modV.String())
+					if inst.Opts.GHA {
+						emitGHAWarning(inst.cwd,
+							pass.Fset.Position(imp.Pos()),
+							pass.Fset.Position(imp.End()),
+							msg)
+						if goSumE.Line > 0 {
+							sumPosn := token.Position{
+								Filename: goSumFilename,
+								Line:     goSumE.Line,
+								Column:   1,
+							}
+							emitGHAWarning(inst.cwd, sumPosn, sumPosn, msg)
+						}
+					} else {
+						pass.Report(analysis.Diagnostic{
+							Pos:     imp.Pos(),
+							End:     imp.End(),
+							Message: msg,
+						})
 					}
-					pass.Report(diag)
 				} else {
 					slog.DebugContext(ctx, "cache hit", "path", p, "hit[0]", hit[0])
 				}
@@ -175,17 +203,57 @@ func isLocalPath(path string) bool {
 	return strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../") || strings.HasPrefix(path, "/")
 }
 
-func parseGoSum(r io.Reader) (map[string]string, error) {
+// Per GitHub Actions workflow-command spec: property values escape
+// `%`, `\r`, `\n`, `:`, `,`; message data escapes `%`, `\r`, `\n`.
+var (
+	ghaPropEscaper = strings.NewReplacer(
+		"%", "%25",
+		"\r", "%0D",
+		"\n", "%0A",
+		":", "%3A",
+		",", "%2C",
+	)
+	ghaMsgEscaper = strings.NewReplacer(
+		"%", "%25",
+		"\r", "%0D",
+		"\n", "%0A",
+	)
+)
+
+func emitGHAWarning(cwd string, posn, endPosn token.Position, msg string) {
+	file := posn.Filename
+	if rel, err := filepath.Rel(cwd, file); err == nil {
+		file = rel
+	}
+	fmt.Printf("::warning file=%s,line=%d,col=%d,endLine=%d,endColumn=%d,title=%s::%s\n",
+		ghaPropEscaper.Replace(file),
+		posn.Line,
+		posn.Column,
+		endPosn.Line,
+		endPosn.Column,
+		ghaPropEscaper.Replace("gosocialcheck"),
+		ghaMsgEscaper.Replace(msg),
+	)
+}
+
+type goSumEntry struct {
+	H1   string
+	Line int // 1-based line number in go.sum
+}
+
+func parseGoSum(r io.Reader) (map[string]goSumEntry, error) {
 	sc := bufio.NewScanner(r)
-	res := make(map[string]string)
+	res := make(map[string]goSumEntry)
+	lineNo := 0
 	for sc.Scan() {
+		lineNo++
 		line := sc.Text()
 		line = strings.TrimSpace(line)
 		fields := strings.Fields(line)
 		if len(fields) != 3 {
 			return res, fmt.Errorf("expected 3 fields, got %v", fields)
 		}
-		res[fields[0]+" "+fields[1]] = fields[2]
+		res[fields[0]+" "+fields[1]] = goSumEntry{H1: fields[2], Line: lineNo}
 	}
 	return res, sc.Err()
 }

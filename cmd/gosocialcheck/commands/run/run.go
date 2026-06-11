@@ -21,6 +21,9 @@ func New() *cobra.Command {
 		RunE:                  action,
 		DisableFlagsInUseLine: true,
 	}
+	flags := cmd.Flags()
+	flags.Bool("gha", false,
+		"Emit diagnostics as GitHub Actions workflow commands and always exit 0")
 	return cmd
 }
 
@@ -51,13 +54,18 @@ func action(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	flags := cmd.Flags()
-	goflags := flagutil.PFlagSetToGoFlagSet(flags, []string{"debug", "cache-mode"})
+	gha, err := flags.GetBool("gha")
+	if err != nil {
+		return err
+	}
+	goflags := flagutil.PFlagSetToGoFlagSet(flags, []string{"debug", "cache-mode", "gha"})
 	if err := goflags.Parse(args); err != nil {
 		return err
 	}
 	opts := analyzer.Opts{
 		Flags: *goflags,
 		Cache: c,
+		GHA:   gha,
 	}
 	a, err := analyzer.New(ctx, opts)
 	if err != nil {
