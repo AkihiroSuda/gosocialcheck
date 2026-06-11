@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck/cacheopt"
 	"github.com/AkihiroSuda/gosocialcheck/pkg/cache"
 )
 
@@ -17,6 +18,9 @@ func New() *cobra.Command {
 		RunE:                  action,
 		DisableFlagsInUseLine: true,
 	}
+	flags := cmd.Flags()
+	flags.String("cache-remote", cache.DefaultRemoteURL,
+		"URL of the remote cache repository")
 	return cmd
 }
 
@@ -25,7 +29,16 @@ func action(cmd *cobra.Command, args []string) error {
 	onProgress := func(ctx context.Context, ev cache.ProgressEvent) {
 		slog.InfoContext(ctx, "progress: "+ev.Message)
 	}
-	c, err := cache.New(cache.WithProgressEventHandler(onProgress))
+	cacheOpts, err := cacheopt.FromCommand(cmd)
+	if err != nil {
+		return err
+	}
+	cacheRemote, _ := cmd.Flags().GetString("cache-remote")
+	cacheOpts = append(cacheOpts,
+		cache.WithRemoteURL(cacheRemote),
+		cache.WithProgressEventHandler(onProgress),
+	)
+	c, err := cache.New(cacheOpts...)
 	if err != nil {
 		return err
 	}
