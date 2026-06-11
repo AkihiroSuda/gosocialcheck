@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"go/token"
 	"io"
 	"log/slog"
 	"os"
@@ -26,6 +27,11 @@ import (
 type Opts struct {
 	Flags flag.FlagSet
 	Cache *cache.Cache
+	// GHA emits diagnostics as GitHub Actions workflow commands on stdout
+	// instead of via [analysis.Pass.Report], so the process exits 0 even
+	// when there are findings. See:
+	// https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands
+	GHA bool
 }
 
 const (
@@ -34,9 +40,14 @@ const (
 )
 
 func New(ctx context.Context, opts Opts) (*analysis.Analyzer, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
 	inst := &instance{
 		Opts:          opts,
 		processedSums: make(map[string]struct{}),
+		cwd:           cwd,
 	}
 	a := &analysis.Analyzer{
 		Name:             "gosocialcheck",
@@ -53,6 +64,7 @@ type instance struct {
 	Opts
 	processedSums   map[string]struct{}
 	processedSumsMu sync.RWMutex
+	cwd             string
 }
 
 func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) {
@@ -125,14 +137,21 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 					return nil, err
 				}
 				if len(hit) == 0 {
-					diag := analysis.Diagnostic{
-						Pos: imp.Pos(),
-						End: imp.End(),
-						Message: fmt.Sprintf("import '%s': module '%s' does not seem adopted by a trusted project "+
-							"(negligible if you trust the module)",
-							p, modV.String()),
+					msg := fmt.Sprintf("import '%s': module '%s' does not seem adopted by a trusted project "+
+						"(negligible if you trust the module)",
+						p, modV.String())
+					if inst.Opts.GHA {
+						emitGHAWarning(inst.cwd,
+							pass.Fset.Position(imp.Pos()),
+							pass.Fset.Position(imp.End()),
+							msg)
+					} else {
+						pass.Report(analysis.Diagnostic{
+							Pos:     imp.Pos(),
+							End:     imp.End(),
+							Message: msg,
+						})
 					}
-					pass.Report(diag)
 				} else {
 					slog.DebugContext(ctx, "cache hit", "path", p, "hit[0]", hit[0])
 				}
@@ -173,6 +192,39 @@ func moduleVersion(goMod *modfile.File, imp string) *module.Version {
 
 func isLocalPath(path string) bool {
 	return strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../") || strings.HasPrefix(path, "/")
+}
+
+// Per GitHub Actions workflow-command spec: property values escape
+// `%`, `\r`, `\n`, `:`, `,`; message data escapes `%`, `\r`, `\n`.
+var (
+	ghaPropEscaper = strings.NewReplacer(
+		"%", "%25",
+		"\r", "%0D",
+		"\n", "%0A",
+		":", "%3A",
+		",", "%2C",
+	)
+	ghaMsgEscaper = strings.NewReplacer(
+		"%", "%25",
+		"\r", "%0D",
+		"\n", "%0A",
+	)
+)
+
+func emitGHAWarning(cwd string, posn, endPosn token.Position, msg string) {
+	file := posn.Filename
+	if rel, err := filepath.Rel(cwd, file); err == nil {
+		file = rel
+	}
+	fmt.Printf("::warning file=%s,line=%d,col=%d,endLine=%d,endColumn=%d,title=%s::%s\n",
+		ghaPropEscaper.Replace(file),
+		posn.Line,
+		posn.Column,
+		endPosn.Line,
+		endPosn.Column,
+		ghaPropEscaper.Replace("gosocialcheck"),
+		ghaMsgEscaper.Replace(msg),
+	)
 }
 
 func parseGoSum(r io.Reader) (map[string]string, error) {

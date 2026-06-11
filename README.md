@@ -34,6 +34,18 @@ import 'github.com/lmittmann/tint': module 'github.com/lmittmann/tint@v1.0.7' do
 ```
 
 ## Hints
+### GitHub Actions
+
+Pass `--gha` to emit findings as
+[workflow commands](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands)
+so they show up as annotations on the workflow run and any associated PR.
+In this mode the command always exits 0.
+
+```yaml
+- run: go install github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck@latest
+- run: gosocialcheck run --gha ./...
+```
+
 ### Allowlist
 
 Use `//gosocialcheck:trusted` [directives](https://github.com/AkihiroSuda/gomoddirectivecomments) in `go.mod` to silence alerts for trustworthy modules.
