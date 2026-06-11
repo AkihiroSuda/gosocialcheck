@@ -2,11 +2,15 @@ package run
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/tools/go/analysis/singlechecker"
+	"golang.org/x/tools/go/analysis"
+	"golang.org/x/tools/go/analysis/checker"
+	"golang.org/x/tools/go/packages"
 
 	"github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck/cacheopt"
 	"github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck/flagutil"
@@ -16,7 +20,7 @@ import (
 
 func New() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:                   "run",
+		Use:                   "run [package ...]",
 		Short:                 "Run the analyzer",
 		RunE:                  action,
 		DisableFlagsInUseLine: true,
@@ -28,16 +32,10 @@ func New() *cobra.Command {
 }
 
 func action(cmd *cobra.Command, args []string) error {
-	// Rewrite the global os.Args, as a workaround for:
-	// - https://github.com/AkihiroSuda/gosocialcheck/issues/1
-	// - https://github.com/golang/go/issues/73875
-	//
-	// golang.org/x/tools/go/analysis/singlechecker parses the global args
-	// rather than flag.FlagSet.Args, and raises an error:
-	// `-: package run is not in std (/opt/homebrew/Cellar/go/1.24.3/libexec/src/run`
-	os.Args = append([]string{"gosocialcheck-run"}, args...)
-
 	ctx := cmd.Context()
+	if len(args) == 0 {
+		return errors.New("at least one package pattern is required (e.g. ./...)")
+	}
 	cacheOpts, err := cacheopt.FromCommand(cmd)
 	if err != nil {
 		return err
@@ -59,9 +57,6 @@ func action(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	goflags := flagutil.PFlagSetToGoFlagSet(flags, []string{"debug", "cache-mode", "gha"})
-	if err := goflags.Parse(args); err != nil {
-		return err
-	}
 	opts := analyzer.Opts{
 		Flags: *goflags,
 		Cache: c,
@@ -71,7 +66,41 @@ func action(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	singlechecker.Main(a)
-	// NOTREACHED
+
+	pkgsCfg := &packages.Config{
+		Context: ctx,
+		Mode:    packages.LoadAllSyntax | packages.NeedModule,
+	}
+	initial, err := packages.Load(pkgsCfg, args...)
+	if err != nil {
+		return fmt.Errorf("failed to load packages: %w", err)
+	}
+	if len(initial) == 0 {
+		return fmt.Errorf("no packages matched %v", args)
+	}
+	pkgErrors := packages.PrintErrors(initial)
+
+	graph, err := checker.Analyze([]*analysis.Analyzer{a}, initial, nil)
+	if err != nil {
+		return err
+	}
+	if err := graph.PrintText(os.Stderr, -1); err != nil {
+		return err
+	}
+
+	var analyzerErrors, rootDiags int
+	for act := range graph.All() {
+		if act.Err != nil {
+			analyzerErrors++
+		} else if act.IsRoot {
+			rootDiags += len(act.Diagnostics)
+		}
+	}
+	if pkgErrors > 0 || analyzerErrors > 0 {
+		return fmt.Errorf("analysis failed: %d package error(s), %d analyzer error(s)", pkgErrors, analyzerErrors)
+	}
+	if rootDiags > 0 {
+		return fmt.Errorf("found %d diagnostic(s)", rootDiags)
+	}
 	return nil
 }
