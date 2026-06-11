@@ -7,16 +7,13 @@ List of trusted projects:
 
 ## Install
 ```bash
-go install github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck@latest
+# Specify @master to use the latest database.
+# Specify @vX.Y.Z to use a specific version.
+go install github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck@master
 ```
 
 ## Usage
 ```
-# Set the token if facing the GitHub API rate limit (see below)
-export GITHUB_TOKEN=...
-
-gosocialcheck update
-
 gosocialcheck run ./...
 ```
 
@@ -56,8 +53,20 @@ require (
 
 Note: The directive ignores the module version.
 
-### GitHub API rate limit
-gosocialcheck uses the GitHub API for the following operations:
+### Updating the database
+
+The database is ([periodically committed](.github/workflows/update-db.yml) to `pkg/embeddeddb/db`.
+
+To fetch the latest database, run:
+```
+# Set the token if facing the GitHub API rate limit (see below)
+export GITHUB_TOKEN=...
+
+gosocialcheck update
+```
+
+#### GitHub API rate limit
+`gosocialcheck update` uses the GitHub API for the following operations:
 - Fetch git tags, via `api.github.com`.
 - Fetch `go.mod` and `go.sum`, via `https://raw.githubusercontent.com`.
 
