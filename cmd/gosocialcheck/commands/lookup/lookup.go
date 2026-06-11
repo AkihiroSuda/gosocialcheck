@@ -2,10 +2,14 @@ package lookup
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 
 	"github.com/spf13/cobra"
 
 	"github.com/AkihiroSuda/gosocialcheck/pkg/cache"
+	"github.com/AkihiroSuda/gosocialcheck/pkg/embeddeddb"
 )
 
 func New() *cobra.Command {
@@ -22,12 +26,25 @@ func New() *cobra.Command {
 func action(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	sum := args[0]
-	c, err := cache.New()
+	embFS, err := embeddeddb.FS()
+	if err != nil {
+		return err
+	}
+	c, err := cache.New(cache.WithExtraFS(embFS))
 	if err != nil {
 		return err
 	}
 	if _, err = c.LastUpdated(); err != nil {
-		return err
+		if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		embEmpty, embErr := embeddeddb.IsEmpty()
+		if embErr != nil {
+			return embErr
+		}
+		if embEmpty {
+			return fmt.Errorf("the database is not populated yet (hint: run `gosocialcheck update`): %w", err)
+		}
 	}
 	enc := json.NewEncoder(cmd.OutOrStdout())
 	enc.SetEscapeHTML(false)
