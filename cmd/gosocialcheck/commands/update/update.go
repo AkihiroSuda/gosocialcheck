@@ -8,6 +8,7 @@ import (
 
 	"github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck/cacheopt"
 	"github.com/AkihiroSuda/gosocialcheck/pkg/cache"
+	"github.com/AkihiroSuda/gosocialcheck/pkg/progress"
 )
 
 func New() *cobra.Command {
@@ -26,7 +27,7 @@ func New() *cobra.Command {
 
 func action(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	onProgress := func(ctx context.Context, ev cache.ProgressEvent) {
+	onProgress := func(ctx context.Context, ev progress.Event) {
 		slog.InfoContext(ctx, "progress: "+ev.Message)
 	}
 	cacheOpts, err := cacheopt.FromCommand(cmd)

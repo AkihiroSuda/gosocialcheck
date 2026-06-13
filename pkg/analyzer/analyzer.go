@@ -11,7 +11,10 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +25,7 @@ import (
 	"golang.org/x/tools/go/analysis"
 
 	"github.com/AkihiroSuda/gosocialcheck/pkg/cache"
+	"github.com/AkihiroSuda/gosocialcheck/pkg/progress"
 )
 
 type Opts struct {
@@ -32,6 +36,9 @@ type Opts struct {
 	// when there are findings. See:
 	// https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands
 	GHA bool
+	// OnProgress, if set, receives progress events (e.g. while fetching the base
+	// branch in --gha mode).
+	OnProgress progress.Handler
 }
 
 const (
@@ -39,15 +46,32 @@ const (
 	directivePolicyTrusted   = "trusted"
 )
 
-func New(ctx context.Context, opts Opts) (*analysis.Analyzer, error) {
+// Analyzer wraps an [analysis.Analyzer]. In --gha mode diagnostics are buffered
+// rather than emitted during analysis; the caller must invoke [Analyzer.Flush]
+// once analysis has completed to write the (prioritized and capped) workflow
+// commands. Outside --gha mode Flush is a no-op.
+type Analyzer struct {
+	*analysis.Analyzer
+	inst *instance
+}
+
+// Flush emits the buffered --gha findings. It must be called after analysis has
+// completed. It is a no-op outside --gha mode.
+func (a *Analyzer) Flush(ctx context.Context) {
+	a.inst.flushGHA(ctx)
+}
+
+func New(ctx context.Context, opts Opts) (*Analyzer, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, err
 	}
 	inst := &instance{
-		Opts:          opts,
-		processedSums: make(map[string]struct{}),
-		cwd:           cwd,
+		Opts:                opts,
+		processedSums:       make(map[string]struct{}),
+		cwd:                 cwd,
+		changedSumLines:     make(map[string]map[int]struct{}),
+		changedSumLinesDone: make(map[string]bool),
 	}
 	a := &analysis.Analyzer{
 		Name:             "gosocialcheck",
@@ -57,7 +81,7 @@ func New(ctx context.Context, opts Opts) (*analysis.Analyzer, error) {
 		Run:              run(ctx, inst),
 		RunDespiteErrors: false,
 	}
-	return a, nil
+	return &Analyzer{Analyzer: a, inst: inst}, nil
 }
 
 type instance struct {
@@ -65,6 +89,25 @@ type instance struct {
 	processedSums   map[string]struct{}
 	processedSumsMu sync.RWMutex
 	cwd             string
+
+	// changedSumLines caches, per go.sum file, the set of 1-based line numbers
+	// added or modified in the current pull request. changedSumLinesDone records
+	// whether the computation has run (a nil set with done=true means the change
+	// set could not be determined, so no finding is treated as PR-changed).
+	changedSumLinesMu   sync.Mutex
+	changedSumLines     map[string]map[int]struct{}
+	changedSumLinesDone map[string]bool
+
+	// ghaFindings buffers findings in --gha mode so they can be prioritized and
+	// capped before being emitted by flushGHA.
+	ghaFindingsMu sync.Mutex
+	ghaFindings   []ghaFinding
+}
+
+type ghaFinding struct {
+	msg         string
+	sumPosn     token.Position // go.sum line to annotate
+	changedInPR bool           // go.sum line was added/changed in the pull request
 }
 
 func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) {
@@ -142,17 +185,24 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 						"(negligible if you trust the module)",
 						p, modV.String())
 					if inst.Opts.GHA {
-						emitGHAWarning(inst.cwd,
-							pass.Fset.Position(imp.Pos()),
-							pass.Fset.Position(imp.End()),
-							msg)
+						// Annotate the go.sum line only. If the module has no
+						// go.sum entry there is nothing to annotate.
 						if goSumE.Line > 0 {
-							sumPosn := token.Position{
-								Filename: goSumFilename,
-								Line:     goSumE.Line,
-								Column:   1,
+							f := ghaFinding{
+								msg: msg,
+								sumPosn: token.Position{
+									Filename: goSumFilename,
+									Line:     goSumE.Line,
+									Column:   1,
+								},
 							}
-							emitGHAWarning(inst.cwd, sumPosn, sumPosn, msg)
+							if changed, ok := inst.changedGoSumLines(ctx, goSumFilename); ok {
+								_, f.changedInPR = changed[goSumE.Line]
+							}
+							inst.addGHAFinding(f)
+						} else {
+							slog.DebugContext(ctx, "no go.sum line for module; skipping GHA annotation",
+								"path", p, "modpath", modV.Path)
 						}
 					} else {
 						pass.Report(analysis.Diagnostic{
@@ -168,6 +218,151 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 		}
 		return nil, nil
 	}
+}
+
+// ghaMaxAnnotations bounds how many GitHub Actions annotations --gha emits, to
+// stay within GitHub's per-run limit (50). Findings whose go.sum line changed in
+// the pull request are emitted first, so the most relevant ones survive the cap.
+const ghaMaxAnnotations = 50
+
+func (inst *instance) addGHAFinding(f ghaFinding) {
+	inst.ghaFindingsMu.Lock()
+	inst.ghaFindings = append(inst.ghaFindings, f)
+	inst.ghaFindingsMu.Unlock()
+}
+
+func (inst *instance) flushGHA(ctx context.Context) {
+	if !inst.Opts.GHA {
+		return
+	}
+	inst.ghaFindingsMu.Lock()
+	findings := inst.ghaFindings
+	inst.ghaFindings = nil
+	inst.ghaFindingsMu.Unlock()
+
+	// Deterministic order regardless of how passes were scheduled: PR-changed
+	// findings first, then by go.sum line and message.
+	sort.SliceStable(findings, func(i, j int) bool {
+		a, b := findings[i], findings[j]
+		if a.changedInPR != b.changedInPR {
+			return a.changedInPR
+		}
+		if a.sumPosn.Line != b.sumPosn.Line {
+			return a.sumPosn.Line < b.sumPosn.Line
+		}
+		return a.msg < b.msg
+	})
+
+	shown := len(findings)
+	if shown > ghaMaxAnnotations {
+		shown = ghaMaxAnnotations
+	}
+	for _, f := range findings[:shown] {
+		emitGHAWarning(inst.cwd, f.sumPosn, f.sumPosn, f.msg)
+	}
+	if shown < len(findings) {
+		slog.WarnContext(ctx, "suppressed findings to stay within the GitHub Actions annotation limit",
+			"shown", shown, "total", len(findings), "limit", ghaMaxAnnotations)
+	}
+}
+
+// changedGoSumLines returns the set of 1-based line numbers in goSumFilename
+// that were added or modified in the current pull request. The second return
+// value reports whether the change set was determined: it is false when not
+// running on a pull_request event or when the diff could not be computed, in
+// which case no finding is treated as PR-changed. The result is computed once
+// per file and cached.
+func (inst *instance) changedGoSumLines(ctx context.Context, goSumFilename string) (map[int]struct{}, bool) {
+	inst.changedSumLinesMu.Lock()
+	defer inst.changedSumLinesMu.Unlock()
+	if inst.changedSumLinesDone[goSumFilename] {
+		set := inst.changedSumLines[goSumFilename]
+		return set, set != nil
+	}
+	set := inst.computeChangedGoSumLines(ctx, goSumFilename)
+	inst.changedSumLinesDone[goSumFilename] = true
+	inst.changedSumLines[goSumFilename] = set
+	return set, set != nil
+}
+
+func (inst *instance) progress(ctx context.Context, msg string) {
+	if inst.Opts.OnProgress != nil {
+		inst.Opts.OnProgress(ctx, progress.Event{Message: msg})
+	}
+}
+
+func (inst *instance) computeChangedGoSumLines(ctx context.Context, goSumFilename string) map[int]struct{} {
+	baseRef := os.Getenv("GITHUB_BASE_REF")
+	if baseRef == "" {
+		// Not a pull_request event; nothing is treated as PR-changed.
+		return nil
+	}
+	dir := filepath.Dir(goSumFilename)
+	base := filepath.Base(goSumFilename)
+	// actions/checkout makes a shallow clone that omits the base branch, so fetch
+	// its tip on demand (into FETCH_HEAD) instead of requiring fetch-depth: 0.
+	inst.progress(ctx, fmt.Sprintf("fetching the base ref %q", baseRef))
+	if out, err := runGit(ctx, dir, "fetch", "--no-tags", "--depth=1", "origin", baseRef); err != nil {
+		slog.WarnContext(ctx, "could not fetch base branch for --gha; not prioritizing PR-changed go.sum lines",
+			"baseRef", baseRef, "error", err, "output", out)
+		return nil
+	}
+	// Diff the fetched base tip against the working tree, so the reported line
+	// numbers match the go.sum the analyzer read.
+	out, err := runGitDiff(ctx, dir, "FETCH_HEAD", base)
+	if err != nil {
+		slog.WarnContext(ctx, "could not diff go.sum against base branch for --gha",
+			"baseRef", baseRef, "error", err)
+		return nil
+	}
+	return parseDiffNewLines(out)
+}
+
+func runGit(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+func runGitDiff(ctx context.Context, dir, base, path string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "diff", "--unified=0", "--no-color", base, "--", path)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), nil
+}
+
+// hunkHeaderRe matches unified-diff hunk headers, capturing the new-side start
+// line and optional line count, e.g. "@@ -1,2 +3,4 @@".
+var hunkHeaderRe = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@`)
+
+func parseDiffNewLines(diff string) map[int]struct{} {
+	res := make(map[int]struct{})
+	sc := bufio.NewScanner(strings.NewReader(diff))
+	for sc.Scan() {
+		m := hunkHeaderRe.FindStringSubmatch(sc.Text())
+		if m == nil {
+			continue
+		}
+		start, err := strconv.Atoi(m[1])
+		if err != nil {
+			continue
+		}
+		count := 1
+		if m[2] != "" {
+			count, err = strconv.Atoi(m[2])
+			if err != nil {
+				continue
+			}
+		}
+		for i := 0; i < count; i++ {
+			res[start+i] = struct{}{}
+		}
+	}
+	return res
 }
 
 func moduleVersion(goMod *modfile.File, imp string) *module.Version {
