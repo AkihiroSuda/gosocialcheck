@@ -28,9 +28,15 @@ import (
 	"github.com/AkihiroSuda/gosocialcheck/pkg/progress"
 )
 
+// Resolver resolves a module's h1 go.sum hash to the trusted projects that have
+// adopted it. [*cache.Cache] implements it.
+type Resolver interface {
+	Lookup(ctx context.Context, sum string) ([]cache.Meta, error)
+}
+
 type Opts struct {
 	Flags flag.FlagSet
-	Cache *cache.Cache
+	Cache Resolver
 	// GHA emits diagnostics as GitHub Actions workflow commands on stdout
 	// instead of via [analysis.Pass.Report], so the process exits 0 even
 	// when there are findings. See:
@@ -46,19 +52,22 @@ const (
 	directivePolicyTrusted   = "trusted"
 )
 
-// Analyzer wraps an [analysis.Analyzer]. In --gha mode diagnostics are buffered
-// rather than emitted during analysis; the caller must invoke [Analyzer.Flush]
-// once analysis has completed to write the (prioritized and capped) workflow
-// commands. Outside --gha mode Flush is a no-op.
+// Analyzer wraps an [analysis.Analyzer]. The analysis pass only sees imported
+// (direct) dependencies, so indirect dependencies are checked by [Analyzer.Flush]
+// once analysis has completed. In --gha mode direct-dependency diagnostics are
+// also buffered during analysis and emitted (prioritized and capped) by Flush.
 type Analyzer struct {
 	*analysis.Analyzer
 	inst *instance
 }
 
-// Flush emits the buffered --gha findings. It must be called after analysis has
-// completed. It is a no-op outside --gha mode.
-func (a *Analyzer) Flush(ctx context.Context) {
-	a.inst.flushGHA(ctx)
+// Flush checks the indirect dependencies recorded during analysis and emits any
+// findings. In --gha mode it also emits the buffered direct-dependency findings.
+// It must be called after analysis has completed and returns the number of
+// findings that should count toward the diagnostic exit code (always 0 in --gha
+// mode, which exits 0 by design).
+func (a *Analyzer) Flush(ctx context.Context) (int, error) {
+	return a.inst.flush(ctx)
 }
 
 func New(ctx context.Context, opts Opts) (*Analyzer, error) {
@@ -72,6 +81,7 @@ func New(ctx context.Context, opts Opts) (*Analyzer, error) {
 		cwd:                 cwd,
 		changedSumLines:     make(map[string]map[int]struct{}),
 		changedSumLinesDone: make(map[string]bool),
+		mods:                make(map[string]*modInfo),
 	}
 	a := &analysis.Analyzer{
 		Name:             "gosocialcheck",
@@ -102,11 +112,28 @@ type instance struct {
 	// capped before being emitted by flushGHA.
 	ghaFindingsMu sync.Mutex
 	ghaFindings   []ghaFinding
+
+	// mods records the parsed go.mod of each analyzed module, keyed by its go.mod
+	// filename. Flush iterates these require lists to check indirect dependencies,
+	// which never appear as imports in the analyzed source.
+	modsMu sync.Mutex
+	mods   map[string]*modInfo
+}
+
+// modInfo holds the parsed state of a single module needed to check its
+// (indirect) dependencies during Flush.
+type modInfo struct {
+	goModFilename string
+	goSumFilename string
+	goMod         *modfile.File
+	goSum         map[string]goSumEntry
+	policies      map[string]string
 }
 
 type ghaFinding struct {
 	msg         string
-	sumPosn     token.Position // go.sum line to annotate
+	sumPosn     token.Position // go.sum line to annotate (--gha mode)
+	modPosn     token.Position // go.mod line to report (non-gha indirect findings)
 	changedInPR bool           // go.sum line was added/changed in the pull request
 }
 
@@ -145,6 +172,16 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 		if err != nil {
 			return nil, err
 		}
+
+		// Record the module so Flush can check its indirect dependencies, which
+		// are listed in go.mod but never imported by the analyzed source.
+		inst.recordModule(&modInfo{
+			goModFilename: goModFilename,
+			goSumFilename: goSumFilename,
+			goMod:         goMod,
+			goSum:         goSum,
+			policies:      policies,
+		})
 
 		for _, file := range pass.Files {
 			for _, imp := range file.Imports {
@@ -224,6 +261,133 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 // stay within GitHub's per-run limit (50). Findings whose go.sum line changed in
 // the pull request are emitted first, so the most relevant ones survive the cap.
 const ghaMaxAnnotations = 50
+
+func (inst *instance) recordModule(mi *modInfo) {
+	inst.modsMu.Lock()
+	if _, ok := inst.mods[mi.goModFilename]; !ok {
+		inst.mods[mi.goModFilename] = mi
+	}
+	inst.modsMu.Unlock()
+}
+
+// flush checks indirect dependencies and emits findings. In --gha mode the
+// indirect findings join the buffered direct findings before being prioritized,
+// capped, and emitted as workflow commands; the returned count is 0 because
+// --gha always exits 0. Outside --gha mode the indirect findings are printed and
+// the returned count feeds the diagnostic exit code (direct findings are emitted
+// separately by the analysis framework).
+func (inst *instance) flush(ctx context.Context) (int, error) {
+	findings, err := inst.collectIndirect(ctx)
+	if inst.Opts.GHA {
+		for _, f := range findings {
+			inst.addGHAFinding(f)
+		}
+		inst.flushGHA(ctx)
+		return 0, err
+	}
+	for _, f := range findings {
+		fmt.Fprintf(os.Stderr, "%s:%d:%d: %s\n", f.modPosn.Filename, f.modPosn.Line, f.modPosn.Column, f.msg)
+	}
+	return len(findings), err
+}
+
+// collectIndirect iterates the require list of every recorded module and returns
+// a finding for each non-trusted module that is not adopted by a trusted project
+// and was not already reported via an import site (tracked in processedSums).
+// This covers indirect dependencies, which never appear as imports in the
+// analyzed source.
+func (inst *instance) collectIndirect(ctx context.Context) ([]ghaFinding, error) {
+	inst.modsMu.Lock()
+	names := make([]string, 0, len(inst.mods))
+	for name := range inst.mods {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	mods := make([]*modInfo, 0, len(names))
+	for _, name := range names {
+		mods = append(mods, inst.mods[name])
+	}
+	inst.modsMu.Unlock()
+
+	var res []ghaFinding
+	for _, mi := range mods {
+		for _, r := range mi.goMod.Require {
+			modV := resolveReplace(mi.goMod, r.Mod)
+			if modV == nil {
+				continue
+			}
+			if mi.policies[modV.Path] == directivePolicyTrusted {
+				slog.DebugContext(ctx, "module marked as trusted via gosocialcheck:trusted directive", "path", modV.Path)
+				continue
+			}
+			goSumE := mi.goSum[modV.Path+" "+modV.Version]
+			h1 := goSumE.H1
+			if h1 == "" {
+				slog.DebugContext(ctx, "no go.sum entry for required module; skipping", "path", modV.Path, "version", modV.Version)
+				continue
+			}
+			inst.processedSumsMu.Lock()
+			_, h1Processed := inst.processedSums[h1]
+			if !h1Processed {
+				inst.processedSums[h1] = struct{}{}
+			}
+			inst.processedSumsMu.Unlock()
+			if h1Processed {
+				// Already reported via an import site (direct dependency).
+				continue
+			}
+			hit, err := inst.Opts.Cache.Lookup(ctx, h1)
+			if err != nil {
+				return res, err
+			}
+			if len(hit) > 0 {
+				slog.DebugContext(ctx, "cache hit", "path", modV.Path, "hit[0]", hit[0])
+				continue
+			}
+			kind := "dependency"
+			if r.Indirect {
+				kind = "indirect dependency"
+			}
+			msg := fmt.Sprintf("module '%s' (%s) does not seem adopted by a trusted project "+
+				"(negligible if you trust the module)", modV.String(), kind)
+			f := ghaFinding{
+				msg: msg,
+				// Non-GHA findings point at the go.mod require line; GHA findings
+				// annotate the go.sum line (set below when available).
+				modPosn: token.Position{
+					Filename: mi.goModFilename,
+					Line:     requireLine(r),
+					Column:   1,
+				},
+			}
+			if inst.Opts.GHA {
+				if goSumE.Line == 0 {
+					slog.DebugContext(ctx, "no go.sum line for module; skipping GHA annotation", "path", modV.Path)
+					continue
+				}
+				f.sumPosn = token.Position{
+					Filename: mi.goSumFilename,
+					Line:     goSumE.Line,
+					Column:   1,
+				}
+				if changed, ok := inst.changedGoSumLines(ctx, mi.goSumFilename); ok {
+					_, f.changedInPR = changed[goSumE.Line]
+				}
+			}
+			res = append(res, f)
+		}
+	}
+	return res, nil
+}
+
+// requireLine returns the 1-based go.mod line of a require entry, or 0 if it is
+// not available.
+func requireLine(r *modfile.Require) int {
+	if r.Syntax != nil {
+		return r.Syntax.Start.Line
+	}
+	return 0
+}
 
 func (inst *instance) addGHAFinding(f ghaFinding) {
 	inst.ghaFindingsMu.Lock()
@@ -378,8 +542,13 @@ func moduleVersion(goMod *modfile.File, imp string) *module.Version {
 	if reqMod == nil {
 		return nil
 	}
+	return resolveReplace(goMod, *reqMod)
+}
 
-	// Check for replace directive
+// resolveReplace applies any matching replace directive to reqMod and returns
+// the effective module version to check. It returns nil when the module is
+// replaced by a local path (which has no go.sum entry).
+func resolveReplace(goMod *modfile.File, reqMod module.Version) *module.Version {
 	for _, r := range goMod.Replace {
 		// Match if: same path AND (replace has no version OR versions match)
 		if r.Old.Path == reqMod.Path && (r.Old.Version == "" || r.Old.Version == reqMod.Version) {
@@ -387,11 +556,11 @@ func moduleVersion(goMod *modfile.File, imp string) *module.Version {
 			if isLocalPath(r.New.Path) {
 				return nil
 			}
-			return &r.New
+			newMod := r.New
+			return &newMod
 		}
 	}
-
-	return reqMod
+	return &reqMod
 }
 
 func isLocalPath(path string) bool {
