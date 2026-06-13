@@ -86,10 +86,15 @@ func action(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	// In --gha mode findings are buffered during analysis; emit them now,
-	// prioritized and capped to fit GitHub's annotation limit.
-	a.Flush(ctx)
+	// The analysis pass only sees direct (imported) dependencies; print those
+	// findings first.
 	if err := graph.PrintText(os.Stderr, -1); err != nil {
+		return err
+	}
+	// Then check indirect dependencies (and, in --gha mode, emit the buffered
+	// direct findings prioritized and capped to fit GitHub's annotation limit).
+	indirectDiags, err := a.Flush(ctx)
+	if err != nil {
 		return err
 	}
 
@@ -104,8 +109,8 @@ func action(cmd *cobra.Command, args []string) error {
 	if pkgErrors > 0 || analyzerErrors > 0 {
 		return fmt.Errorf("analysis failed: %d package error(s), %d analyzer error(s)", pkgErrors, analyzerErrors)
 	}
-	if rootDiags > 0 {
-		return fmt.Errorf("found %d diagnostic(s)", rootDiags)
+	if total := rootDiags + indirectDiags; total > 0 {
+		return fmt.Errorf("found %d diagnostic(s)", total)
 	}
 	return nil
 }

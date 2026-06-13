@@ -12,6 +12,8 @@ import (
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
 	"gotest.tools/v3/assert"
+
+	"github.com/AkihiroSuda/gosocialcheck/pkg/cache"
 )
 
 func captureStdout(t *testing.T, fn func()) string {
@@ -172,6 +174,167 @@ require github.com/bar/baz v1.0.0
 			assert.NilError(t, err)
 
 			got := moduleVersion(goMod, tt.imp)
+			if tt.expected == nil {
+				assert.Assert(t, got == nil, "expected nil, got %v", got)
+			} else {
+				assert.Assert(t, got != nil, "expected %v, got nil", tt.expected)
+				assert.Equal(t, tt.expected.Path, got.Path)
+				assert.Equal(t, tt.expected.Version, got.Version)
+			}
+		})
+	}
+}
+
+type fakeResolver struct {
+	// hits maps an h1 sum to a non-empty result (adopted by a trusted project).
+	hits map[string][]cache.Meta
+}
+
+func (f *fakeResolver) Lookup(_ context.Context, sum string) ([]cache.Meta, error) {
+	return f.hits[sum], nil
+}
+
+func newInstanceForTest(t *testing.T, gha bool, resolver Resolver) *instance {
+	t.Helper()
+	return &instance{
+		Opts:                Opts{GHA: gha, Cache: resolver},
+		processedSums:       make(map[string]struct{}),
+		changedSumLines:     make(map[string]map[int]struct{}),
+		changedSumLinesDone: make(map[string]bool),
+		mods:                make(map[string]*modInfo),
+	}
+}
+
+func TestCollectIndirect(t *testing.T) {
+	const goModSrc = `module example.com/foo
+
+go 1.25.0
+
+require example.com/direct v1.0.0
+
+require (
+	example.com/indirect-untrusted v1.2.0 // indirect
+	example.com/indirect-trusted-adopted v1.3.0 // indirect
+)
+`
+	goMod, err := modfile.Parse("go.mod", []byte(goModSrc), nil)
+	assert.NilError(t, err)
+
+	const goSumSrc = `example.com/direct v1.0.0 h1:direct=
+example.com/indirect-untrusted v1.2.0 h1:untrusted=
+example.com/indirect-trusted-adopted v1.3.0 h1:adopted=
+`
+	goSum, err := parseGoSum(strings.NewReader(goSumSrc))
+	assert.NilError(t, err)
+
+	resolver := &fakeResolver{hits: map[string][]cache.Meta{
+		"h1:adopted=": {{Category: "cncf-graduated"}},
+	}}
+
+	mi := &modInfo{
+		goModFilename: "/repo/go.mod",
+		goSumFilename: "/repo/go.sum",
+		goMod:         goMod,
+		goSum:         goSum,
+		policies:      map[string]string{},
+	}
+
+	t.Run("non-gha reports unadopted indirect deps at go.mod lines", func(t *testing.T) {
+		inst := newInstanceForTest(t, false, resolver)
+		inst.recordModule(mi)
+		// Simulate the direct dependency having been reported via its import site.
+		inst.processedSums["h1:direct="] = struct{}{}
+
+		findings, err := inst.collectIndirect(context.Background())
+		assert.NilError(t, err)
+		assert.Equal(t, 1, len(findings))
+		f := findings[0]
+		assert.Assert(t, strings.Contains(f.msg, "example.com/indirect-untrusted@v1.2.0"), "msg: %q", f.msg)
+		assert.Equal(t, "/repo/go.mod", f.modPosn.Filename)
+		assert.Equal(t, 8, f.modPosn.Line)
+	})
+
+	t.Run("trusted directive silences indirect dep", func(t *testing.T) {
+		inst := newInstanceForTest(t, false, resolver)
+		miTrusted := *mi
+		miTrusted.policies = map[string]string{"example.com/indirect-untrusted": directivePolicyTrusted}
+		inst.recordModule(&miTrusted)
+		inst.processedSums["h1:direct="] = struct{}{}
+
+		findings, err := inst.collectIndirect(context.Background())
+		assert.NilError(t, err)
+		assert.Equal(t, 0, len(findings))
+	})
+
+	t.Run("gha annotates go.sum line", func(t *testing.T) {
+		inst := newInstanceForTest(t, true, resolver)
+		inst.recordModule(mi)
+		inst.processedSums["h1:direct="] = struct{}{}
+
+		findings, err := inst.collectIndirect(context.Background())
+		assert.NilError(t, err)
+		assert.Equal(t, 1, len(findings))
+		f := findings[0]
+		assert.Equal(t, "/repo/go.sum", f.sumPosn.Filename)
+		assert.Equal(t, 2, f.sumPosn.Line) // line of indirect-untrusted in go.sum
+	})
+
+	t.Run("already-processed direct deps are skipped", func(t *testing.T) {
+		inst := newInstanceForTest(t, false, resolver)
+		inst.recordModule(mi)
+		// Mark every module as already processed.
+		for _, h := range []string{"h1:direct=", "h1:untrusted=", "h1:adopted="} {
+			inst.processedSums[h] = struct{}{}
+		}
+		findings, err := inst.collectIndirect(context.Background())
+		assert.NilError(t, err)
+		assert.Equal(t, 0, len(findings))
+	})
+}
+
+func TestResolveReplace(t *testing.T) {
+	tests := []struct {
+		name     string
+		goMod    string
+		reqPath  string
+		reqVer   string
+		expected *module.Version
+	}{
+		{
+			name: "no replace",
+			goMod: `module example.com/foo
+require github.com/bar/baz v1.0.0
+`,
+			reqPath:  "github.com/bar/baz",
+			reqVer:   "v1.0.0",
+			expected: &module.Version{Path: "github.com/bar/baz", Version: "v1.0.0"},
+		},
+		{
+			name: "blanket replace",
+			goMod: `module example.com/foo
+require github.com/bar/baz v1.0.0
+replace github.com/bar/baz => github.com/my/fork v2.0.0
+`,
+			reqPath:  "github.com/bar/baz",
+			reqVer:   "v1.0.0",
+			expected: &module.Version{Path: "github.com/my/fork", Version: "v2.0.0"},
+		},
+		{
+			name: "local path replace yields nil",
+			goMod: `module example.com/foo
+require github.com/bar/baz v1.0.0
+replace github.com/bar/baz => ../local/baz
+`,
+			reqPath:  "github.com/bar/baz",
+			reqVer:   "v1.0.0",
+			expected: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			goMod, err := modfile.Parse("go.mod", []byte(tt.goMod), nil)
+			assert.NilError(t, err)
+			got := resolveReplace(goMod, module.Version{Path: tt.reqPath, Version: tt.reqVer})
 			if tt.expected == nil {
 				assert.Assert(t, got == nil, "expected nil, got %v", got)
 			} else {
