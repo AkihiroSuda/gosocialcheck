@@ -38,10 +38,16 @@ import 'github.com/lmittmann/tint': module 'github.com/lmittmann/tint@v1.0.7' do
 
 Pass `--gha` to emit findings as
 [workflow commands](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands)
-so they show up as annotations on the workflow run and any associated PR.
+so they show up as annotations ([up to 10](https://github.com/actions/toolkit/blob/main/docs/problem-matchers.md#limitations)) on the workflow run and any associated PR.
 In this mode the command always exits 0.
 
+To stay within GitHub's annotation limits, `--gha` caps the number of emitted
+annotations and reports findings whose `go.sum` line changed in the PR first. On
+a `pull_request` event it fetches the base branch (`GITHUB_BASE_REF`) on demand
+to detect those lines, so the default shallow checkout works as-is:
+
 ```yaml
+- uses: actions/checkout@v4
 - run: go install github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck@latest
 - run: gosocialcheck run --gha ./...
 ```

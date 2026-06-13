@@ -59,9 +59,10 @@ func action(cmd *cobra.Command, args []string) error {
 	}
 	goflags := flagutil.PFlagSetToGoFlagSet(flags, []string{"debug", "cache-mode", "gha"})
 	opts := analyzer.Opts{
-		Flags: *goflags,
-		Cache: c,
-		GHA:   gha,
+		Flags:      *goflags,
+		Cache:      c,
+		GHA:        gha,
+		OnProgress: onProgress,
 	}
 	a, err := analyzer.New(ctx, opts)
 	if err != nil {
@@ -81,10 +82,13 @@ func action(cmd *cobra.Command, args []string) error {
 	}
 	pkgErrors := packages.PrintErrors(initial)
 
-	graph, err := checker.Analyze([]*analysis.Analyzer{a}, initial, nil)
+	graph, err := checker.Analyze([]*analysis.Analyzer{a.Analyzer}, initial, nil)
 	if err != nil {
 		return err
 	}
+	// In --gha mode findings are buffered during analysis; emit them now,
+	// prioritized and capped to fit GitHub's annotation limit.
+	a.Flush(ctx)
 	if err := graph.PrintText(os.Stderr, -1); err != nil {
 		return err
 	}
