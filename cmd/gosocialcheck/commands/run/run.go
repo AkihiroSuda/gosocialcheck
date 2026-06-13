@@ -16,6 +16,7 @@ import (
 	"github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck/flagutil"
 	"github.com/AkihiroSuda/gosocialcheck/pkg/analyzer"
 	"github.com/AkihiroSuda/gosocialcheck/pkg/cache"
+	"github.com/AkihiroSuda/gosocialcheck/pkg/progress"
 )
 
 func New() *cobra.Command {
@@ -40,7 +41,7 @@ func action(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	onProgress := func(ctx context.Context, ev cache.ProgressEvent) {
+	onProgress := func(ctx context.Context, ev progress.Event) {
 		slog.InfoContext(ctx, "progress: "+ev.Message)
 	}
 	cacheOpts = append(cacheOpts, cache.WithProgressEventHandler(onProgress))

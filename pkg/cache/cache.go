@@ -26,7 +26,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -42,6 +41,7 @@ import (
 	"github.com/AkihiroSuda/gosocialcheck/pkg/categories"
 	"github.com/AkihiroSuda/gosocialcheck/pkg/netutil"
 	"github.com/AkihiroSuda/gosocialcheck/pkg/netutil/github"
+	"github.com/AkihiroSuda/gosocialcheck/pkg/progress"
 	"github.com/AkihiroSuda/gosocialcheck/pkg/source/cncf"
 )
 
@@ -77,21 +77,11 @@ const (
 	DefaultRemoteURL = "https://github.com/AkihiroSuda/gosocialcheck-cache.git"
 )
 
-type ProgressEvent struct {
-	Message string `json:"message,omitempty"`
-}
-
-type ProgressEventHandler func(context.Context, ProgressEvent)
-
-func DefaultProgressEventHandler(ctx context.Context, ev ProgressEvent) {
-	slog.DebugContext(ctx, "progress: "+ev.Message)
-}
-
 type opts struct {
 	dir        string
 	mode       Mode
 	remoteURL  string
-	onProgress ProgressEventHandler
+	onProgress progress.Handler
 	httpClient *http.Client
 }
 
@@ -127,7 +117,7 @@ func WithRemoteURL(url string) Opt {
 	}
 }
 
-func WithProgressEventHandler(onProgress ProgressEventHandler) Opt {
+func WithProgressEventHandler(onProgress progress.Handler) Opt {
 	return func(opts *opts) error {
 		opts.onProgress = onProgress
 		return nil
@@ -163,7 +153,7 @@ func New(o ...Opt) (*Cache, error) {
 		c.opts.remoteURL = DefaultRemoteURL
 	}
 	if c.opts.onProgress == nil {
-		c.opts.onProgress = DefaultProgressEventHandler
+		c.opts.onProgress = progress.DefaultHandler
 	}
 	if c.opts.httpClient == nil {
 		c.opts.httpClient = http.DefaultClient
@@ -347,7 +337,7 @@ func (c *Cache) updateRemote(ctx context.Context) error {
 	_, statErr := os.Stat(gitDir)
 	switch {
 	case errors.Is(statErr, fs.ErrNotExist):
-		c.onProgress(ctx, ProgressEvent{Message: "cloning " + c.opts.remoteURL})
+		c.onProgress(ctx, progress.Event{Message: "cloning " + c.opts.remoteURL})
 		args := []string{"clone", "--depth", "1", c.opts.remoteURL, dir}
 		if out, err := runGit(ctx, "", args...); err != nil {
 			return fmt.Errorf("git clone failed: %w: %s", err, out)
@@ -355,7 +345,7 @@ func (c *Cache) updateRemote(ctx context.Context) error {
 	case statErr != nil:
 		return statErr
 	default:
-		c.onProgress(ctx, ProgressEvent{Message: "fetching " + c.opts.remoteURL})
+		c.onProgress(ctx, progress.Event{Message: "fetching " + c.opts.remoteURL})
 		if out, err := runGit(ctx, dir, "fetch", "--depth", "1", "origin"); err != nil {
 			return fmt.Errorf("git fetch failed: %w: %s", err, out)
 		}
@@ -503,11 +493,10 @@ func (c *Cache) updateGitHubRepoTag(ctx context.Context, repo *github.Repo, tag 
 	if err := os.WriteFile(metaF, metaB, 0o644); err != nil {
 		return err
 	}
-	progress := ProgressEvent{
+	c.onProgress(ctx, progress.Event{
 		Message: fmt.Sprintf("%s/%s %s %s (%s)",
 			repo.Owner, repo.Repo, tag.Name, tag.Commit.SHA, category),
-	}
-	c.onProgress(ctx, progress)
+	})
 	return nil
 }
 
