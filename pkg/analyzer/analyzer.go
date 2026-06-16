@@ -131,10 +131,11 @@ type modInfo struct {
 }
 
 type ghaFinding struct {
-	msg         string
-	sumPosn     token.Position // go.sum line to annotate (--gha mode)
-	modPosn     token.Position // go.mod line to report (non-gha indirect findings)
-	changedInPR bool           // go.sum line was added/changed in the pull request
+	msg            string
+	sumPosn        token.Position // go.sum line to annotate (--gha mode)
+	modPosn        token.Position // go.mod line to report (non-gha indirect findings)
+	changedInPR    bool           // go.sum line was added/changed in the pull request
+	changeSetKnown bool           // the pull request change set for the go.sum file was determinable
 }
 
 func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) {
@@ -234,6 +235,7 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 								},
 							}
 							if changed, ok := inst.changedGoSumLines(ctx, goSumFilename); ok {
+								f.changeSetKnown = true
 								_, f.changedInPR = changed[goSumE.Line]
 							}
 							inst.addGHAFinding(f)
@@ -258,8 +260,10 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 }
 
 // ghaMaxAnnotations bounds how many GitHub Actions annotations --gha emits, to
-// stay within GitHub's per-run limit (50). Findings whose go.sum line changed in
-// the pull request are emitted first, so the most relevant ones survive the cap.
+// stay within GitHub's per-run limit (50). On a pull request, findings for
+// untouched modules are dropped entirely (see flushGHA); the cap is a backstop
+// for events where the change set is unknown. Findings whose go.sum line changed
+// in the pull request are emitted first, so the most relevant ones survive.
 const ghaMaxAnnotations = 50
 
 func (inst *instance) recordModule(mi *modInfo) {
@@ -371,6 +375,7 @@ func (inst *instance) collectIndirect(ctx context.Context) ([]ghaFinding, error)
 					Column:   1,
 				}
 				if changed, ok := inst.changedGoSumLines(ctx, mi.goSumFilename); ok {
+					f.changeSetKnown = true
 					_, f.changedInPR = changed[goSumE.Line]
 				}
 			}
@@ -403,6 +408,21 @@ func (inst *instance) flushGHA(ctx context.Context) {
 	findings := inst.ghaFindings
 	inst.ghaFindings = nil
 	inst.ghaFindingsMu.Unlock()
+
+	// On a pull request, annotate only the modules actually added/changed in the
+	// PR: warnings for untouched modules are just noise and waste the limited
+	// annotation budget (issue #69). When the change set for a finding's go.sum
+	// file could not be determined (e.g. not a pull_request event, or the base
+	// branch could not be fetched), keep the finding and fall back to the
+	// prioritize-and-cap behavior below.
+	kept := findings[:0]
+	for _, f := range findings {
+		if f.changeSetKnown && !f.changedInPR {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	findings = kept
 
 	// Deterministic order regardless of how passes were scheduled: PR-changed
 	// findings first, then by go.sum line and message.
