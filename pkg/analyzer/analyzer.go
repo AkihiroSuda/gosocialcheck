@@ -463,23 +463,58 @@ func (inst *instance) computeChangedGoSumLines(ctx context.Context, goSumFilenam
 	}
 	dir := filepath.Dir(goSumFilename)
 	base := filepath.Base(goSumFilename)
-	// actions/checkout makes a shallow clone that omits the base branch, so fetch
-	// its tip on demand (into FETCH_HEAD) instead of requiring fetch-depth: 0.
-	inst.progress(ctx, fmt.Sprintf("fetching the base ref %q", baseRef))
-	if out, err := runGit(ctx, dir, "fetch", "--no-tags", "--depth=1", "origin", baseRef); err != nil {
-		slog.WarnContext(ctx, "could not fetch base branch for --gha; not prioritizing PR-changed go.sum lines",
-			"baseRef", baseRef, "error", err, "output", out)
+	baseTip, ok := inst.resolveBaseTip(ctx, dir, baseRef)
+	if !ok {
 		return nil
 	}
-	// Diff the fetched base tip against the working tree, so the reported line
+	// Diff the base tip against the working tree, so the reported line
 	// numbers match the go.sum the analyzer read.
-	out, err := runGitDiff(ctx, dir, "FETCH_HEAD", base)
+	out, err := runGitDiff(ctx, dir, baseTip, base)
 	if err != nil {
 		slog.WarnContext(ctx, "could not diff go.sum against base branch for --gha",
 			"baseRef", baseRef, "error", err)
 		return nil
 	}
 	return parseDiffNewLines(out)
+}
+
+// resolveBaseTip returns the git ref to diff the working tree against for the
+// pull_request base branch. It prefers a local branch when it is newer than the
+// remote-tracking ref (e.g. when the base branch is checked out and ahead of
+// origin), then the remote-tracking ref (e.g. with fetch-depth: 0). When the
+// base branch is absent locally (actions/checkout's default shallow clone omits
+// it), it fetches the tip on demand into FETCH_HEAD.
+func (inst *instance) resolveBaseTip(ctx context.Context, dir, baseRef string) (string, bool) {
+	localRef := "refs/heads/" + baseRef
+	remoteRef := "origin/" + baseRef
+	localOK := gitRefExists(ctx, dir, localRef)
+	remoteOK := gitRefExists(ctx, dir, remoteRef)
+	switch {
+	case localOK && remoteOK:
+		// Prefer the local branch only when the remote tip is an ancestor of
+		// it (i.e. the local branch is newer); otherwise the remote tip is at
+		// least as up to date.
+		if _, err := runGit(ctx, dir, "merge-base", "--is-ancestor", remoteRef, localRef); err == nil {
+			return localRef, true
+		}
+		return remoteRef, true
+	case localOK:
+		return localRef, true
+	case remoteOK:
+		return remoteRef, true
+	}
+	inst.progress(ctx, fmt.Sprintf("fetching the base ref %q", baseRef))
+	if out, err := runGit(ctx, dir, "fetch", "--no-tags", "--depth=1", "origin", baseRef); err != nil {
+		slog.WarnContext(ctx, "could not fetch base branch for --gha; not prioritizing PR-changed go.sum lines",
+			"baseRef", baseRef, "error", err, "output", out)
+		return "", false
+	}
+	return "FETCH_HEAD", true
+}
+
+func gitRefExists(ctx context.Context, dir, ref string) bool {
+	_, err := runGit(ctx, dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	return err == nil
 }
 
 func runGit(ctx context.Context, dir string, args ...string) (string, error) {
