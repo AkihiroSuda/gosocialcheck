@@ -81,6 +81,26 @@ func TestFlushGHAPrioritizesAndCaps(t *testing.T) {
 		out := captureStdout(t, func() { inst.flushGHA(context.Background()) })
 		assert.Assert(t, strings.Contains(out, "priority-finding"), "changed-in-PR finding must survive the cap")
 	})
+
+	t.Run("drops untouched modules when the PR change set is known", func(t *testing.T) {
+		inst := &instance{Opts: Opts{GHA: true}, cwd: "/repo"}
+		// Known change set, but module not touched in the PR: must be dropped.
+		inst.addGHAFinding(ghaFinding{msg: "untouched-finding", sumPosn: sumPosn(1), changeSetKnown: true})
+		inst.addGHAFinding(ghaFinding{msg: "touched-finding", sumPosn: sumPosn(2), changeSetKnown: true, changedInPR: true})
+		out := captureStdout(t, func() { inst.flushGHA(context.Background()) })
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		assert.Equal(t, 1, len(lines))
+		assert.Assert(t, strings.Contains(out, "touched-finding"), "touched module must be annotated: %q", out)
+		assert.Assert(t, !strings.Contains(out, "untouched-finding"), "untouched module must not be annotated: %q", out)
+	})
+
+	t.Run("keeps findings when the change set is unknown", func(t *testing.T) {
+		inst := &instance{Opts: Opts{GHA: true}, cwd: "/repo"}
+		// Change set could not be determined (e.g. push event): keep the finding.
+		inst.addGHAFinding(ghaFinding{msg: "unknown-finding", sumPosn: sumPosn(1)})
+		out := captureStdout(t, func() { inst.flushGHA(context.Background()) })
+		assert.Assert(t, strings.Contains(out, "unknown-finding"), "finding must survive when change set is unknown: %q", out)
+	})
 }
 
 func TestModuleVersion(t *testing.T) {
