@@ -6,6 +6,8 @@ import (
 	"go/token"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -415,6 +417,126 @@ index 111..222 100644
 			}
 		})
 	}
+}
+
+func gitT(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	out, err := runGit(context.Background(), dir, args...)
+	assert.NilError(t, err, "git %v: %s", args, out)
+	return out
+}
+
+func initRepoT(t *testing.T, dir string) {
+	t.Helper()
+	assert.NilError(t, os.MkdirAll(dir, 0o755))
+	gitT(t, dir, "-c", "init.defaultBranch=master", "init")
+	gitT(t, dir, "config", "user.email", "test@example.com")
+	gitT(t, dir, "config", "user.name", "test")
+	gitT(t, dir, "config", "commit.gpgsign", "false")
+}
+
+func commitFileT(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	assert.NilError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
+	gitT(t, dir, "add", name)
+	gitT(t, dir, "commit", "-m", "commit "+content)
+	return gitT(t, dir, "rev-parse", "HEAD")
+}
+
+func TestResolveBaseTip(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	inst := &instance{}
+
+	t.Run("remote-tracking ref only", func(t *testing.T) {
+		root := t.TempDir()
+		upstream := filepath.Join(root, "upstream")
+		work := filepath.Join(root, "work")
+		initRepoT(t, upstream)
+		commitFileT(t, upstream, "f", "c1")
+		initRepoT(t, work)
+		gitT(t, work, "remote", "add", "origin", upstream)
+		gitT(t, work, "fetch", "origin")
+
+		ref, ok := inst.resolveBaseTip(context.Background(), work, "master")
+		assert.Assert(t, ok)
+		assert.Equal(t, "origin/master", ref)
+	})
+
+	t.Run("local branch only", func(t *testing.T) {
+		root := t.TempDir()
+		work := filepath.Join(root, "work")
+		initRepoT(t, work)
+		commitFileT(t, work, "f", "c1")
+
+		ref, ok := inst.resolveBaseTip(context.Background(), work, "master")
+		assert.Assert(t, ok)
+		assert.Equal(t, "refs/heads/master", ref)
+	})
+
+	t.Run("local branch newer than remote is preferred", func(t *testing.T) {
+		root := t.TempDir()
+		upstream := filepath.Join(root, "upstream")
+		work := filepath.Join(root, "work")
+		initRepoT(t, upstream)
+		commitFileT(t, upstream, "f", "c1")
+		initRepoT(t, work)
+		gitT(t, work, "remote", "add", "origin", upstream)
+		gitT(t, work, "fetch", "origin")
+		// Local master starts at origin/master, then advances ahead of it.
+		gitT(t, work, "checkout", "-B", "master", "origin/master")
+		commitFileT(t, work, "f", "c2")
+
+		ref, ok := inst.resolveBaseTip(context.Background(), work, "master")
+		assert.Assert(t, ok)
+		assert.Equal(t, "refs/heads/master", ref)
+	})
+
+	t.Run("remote newer than local branch is preferred", func(t *testing.T) {
+		root := t.TempDir()
+		upstream := filepath.Join(root, "upstream")
+		work := filepath.Join(root, "work")
+		initRepoT(t, upstream)
+		c1 := commitFileT(t, upstream, "f", "c1")
+		initRepoT(t, work)
+		gitT(t, work, "remote", "add", "origin", upstream)
+		gitT(t, work, "fetch", "origin")
+		// Local master stays at c1 while origin advances to c2.
+		gitT(t, work, "update-ref", "refs/heads/master", c1)
+		commitFileT(t, upstream, "f", "c2")
+		gitT(t, work, "fetch", "origin")
+
+		ref, ok := inst.resolveBaseTip(context.Background(), work, "master")
+		assert.Assert(t, ok)
+		assert.Equal(t, "origin/master", ref)
+	})
+
+	t.Run("fetches into FETCH_HEAD when absent locally", func(t *testing.T) {
+		root := t.TempDir()
+		upstream := filepath.Join(root, "upstream")
+		work := filepath.Join(root, "work")
+		initRepoT(t, upstream)
+		commitFileT(t, upstream, "f", "c1")
+		initRepoT(t, work)
+		// Remote is configured but never fetched: no origin/master, no local master.
+		gitT(t, work, "remote", "add", "origin", upstream)
+
+		ref, ok := inst.resolveBaseTip(context.Background(), work, "master")
+		assert.Assert(t, ok)
+		assert.Equal(t, "FETCH_HEAD", ref)
+	})
+
+	t.Run("returns false when the base ref cannot be obtained", func(t *testing.T) {
+		root := t.TempDir()
+		work := filepath.Join(root, "work")
+		initRepoT(t, work)
+		commitFileT(t, work, "f", "c1")
+		// No remote and no branch named "missing".
+		ref, ok := inst.resolveBaseTip(context.Background(), work, "missing")
+		assert.Assert(t, !ok)
+		assert.Equal(t, "", ref)
+	})
 }
 
 func TestIsLocalPath(t *testing.T) {
