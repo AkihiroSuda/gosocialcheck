@@ -16,6 +16,7 @@ import (
 	"github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck/flagutil"
 	"github.com/AkihiroSuda/gosocialcheck/pkg/analyzer"
 	"github.com/AkihiroSuda/gosocialcheck/pkg/cache"
+	"github.com/AkihiroSuda/gosocialcheck/pkg/netutil/scorecard"
 	"github.com/AkihiroSuda/gosocialcheck/pkg/progress"
 )
 
@@ -29,6 +30,10 @@ func New() *cobra.Command {
 	flags := cmd.Flags()
 	flags.Bool("gha", false,
 		"Emit diagnostics as GitHub Actions workflow commands and always exit 0")
+	flags.Bool("scorecard", false,
+		"Check OpenSSF Scorecard scores of the dependencies (opt-in, as not every repo is covered by Scorecard)")
+	flags.Float64("scorecard-min-score", scorecard.DefaultMinScore,
+		"Minimum acceptable OpenSSF Scorecard score (0-10), for --scorecard")
 	return cmd
 }
 
@@ -57,12 +62,24 @@ func action(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	goflags := flagutil.PFlagSetToGoFlagSet(flags, []string{"debug", "cache-mode", "gha"})
+	scorecardEnabled, err := flags.GetBool("scorecard")
+	if err != nil {
+		return err
+	}
+	scorecardMinScore, err := flags.GetFloat64("scorecard-min-score")
+	if err != nil {
+		return err
+	}
+	goflags := flagutil.PFlagSetToGoFlagSet(flags, []string{"debug", "cache-mode", "gha", "scorecard", "scorecard-min-score"})
 	opts := analyzer.Opts{
 		Flags:      *goflags,
 		Cache:      c,
 		GHA:        gha,
 		OnProgress: onProgress,
+	}
+	if scorecardEnabled {
+		opts.Scorecard = &scorecard.Client{}
+		opts.ScorecardMinScore = scorecardMinScore
 	}
 	a, err := analyzer.New(ctx, opts)
 	if err != nil {

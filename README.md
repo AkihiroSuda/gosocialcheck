@@ -52,6 +52,21 @@ to detect those lines, so the default shallow checkout works as-is:
 - run: gosocialcheck run --gha ./...
 ```
 
+### OpenSSF Scorecard
+
+Pass `--scorecard` to also check the [OpenSSF Scorecard](https://scorecard.dev/) scores
+of the dependencies (direct and indirect). A module is reported when its repository
+scores below `--scorecard-min-score` (default: 5.0) or has no Scorecard data at all.
+
+```bash
+gosocialcheck run --scorecard ./...
+```
+
+This check is opt-in, as not every repository is covered by Scorecard.
+Only modules hosted on `github.com`, `gitlab.com`, and `golang.org/x` are checked;
+modules with vanity import paths are skipped.
+`//gosocialcheck:trusted` directives (see below) silence this check too.
+
 ### Allowlist
 
 Use `//gosocialcheck:trusted` [directives](https://github.com/AkihiroSuda/gomoddirectivecomments) in `go.mod` to silence alerts for trustworthy modules.
