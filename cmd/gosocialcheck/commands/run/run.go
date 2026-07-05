@@ -78,7 +78,7 @@ func action(cmd *cobra.Command, args []string) error {
 		OnProgress: onProgress,
 	}
 	if scorecardEnabled {
-		opts.Scorecard = &scorecard.Client{}
+		opts.Scorecard = c.Scorecard()
 		opts.ScorecardMinScore = scorecardMinScore
 	}
 	a, err := analyzer.New(ctx, opts)

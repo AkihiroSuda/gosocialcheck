@@ -108,6 +108,9 @@ The `--cache-mode` flag (or `$GOSOCIALCHECK_CACHE_MODE`) selects which one is us
 
 `gosocialcheck run` populates the cache automatically on the first run.
 
+With `--scorecard`, the fetched OpenSSF Scorecard results (including negative
+"no data" results) are cached under `_scorecard` for 24 hours.
+
 Run `gosocialcheck info` (or `gosocialcheck info --json`) to inspect the
 current cache state.
 
