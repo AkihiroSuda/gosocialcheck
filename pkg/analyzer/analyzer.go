@@ -22,9 +22,11 @@ import (
 	gomoddirectivecomments "github.com/AkihiroSuda/gomoddirectivecomments"
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/tools/go/analysis"
 
 	"github.com/AkihiroSuda/gosocialcheck/pkg/cache"
+	"github.com/AkihiroSuda/gosocialcheck/pkg/netutil/scorecard"
 	"github.com/AkihiroSuda/gosocialcheck/pkg/progress"
 )
 
@@ -32,6 +34,12 @@ import (
 // adopted it. [*cache.Cache] implements it.
 type Resolver interface {
 	Lookup(ctx context.Context, sum string) ([]cache.Meta, error)
+}
+
+// ScorecardResolver fetches OpenSSF Scorecard results.
+// [*scorecard.Client] implements it.
+type ScorecardResolver interface {
+	Get(ctx context.Context, host, owner, repo string) (*scorecard.Result, error)
 }
 
 type Opts struct {
@@ -45,6 +53,14 @@ type Opts struct {
 	// OnProgress, if set, receives progress events (e.g. while fetching the base
 	// branch in --gha mode).
 	OnProgress progress.Handler
+	// Scorecard, if set, enables the opt-in OpenSSF Scorecard check: every
+	// dependency (direct and indirect) is reported when its repository has no
+	// Scorecard data or scores below ScorecardMinScore. Opt-in because not
+	// every repository is covered by Scorecard.
+	Scorecard ScorecardResolver
+	// ScorecardMinScore is the minimum acceptable aggregate score (0-10).
+	// Only used when Scorecard is set.
+	ScorecardMinScore float64
 }
 
 const (
@@ -282,6 +298,9 @@ func (inst *instance) recordModule(mi *modInfo) {
 // separately by the analysis framework).
 func (inst *instance) flush(ctx context.Context) (int, error) {
 	findings, err := inst.collectIndirect(ctx)
+	scFindings, scErr := inst.collectScorecard(ctx)
+	findings = append(findings, scFindings...)
+	err = errors.Join(err, scErr)
 	if inst.Opts.GHA {
 		for _, f := range findings {
 			inst.addGHAFinding(f)
@@ -301,18 +320,7 @@ func (inst *instance) flush(ctx context.Context) (int, error) {
 // This covers indirect dependencies, which never appear as imports in the
 // analyzed source.
 func (inst *instance) collectIndirect(ctx context.Context) ([]ghaFinding, error) {
-	inst.modsMu.Lock()
-	names := make([]string, 0, len(inst.mods))
-	for name := range inst.mods {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	mods := make([]*modInfo, 0, len(names))
-	for _, name := range names {
-		mods = append(mods, inst.mods[name])
-	}
-	inst.modsMu.Unlock()
-
+	mods := inst.sortedMods()
 	var res []ghaFinding
 	for _, mi := range mods {
 		for _, r := range mi.goMod.Require {
@@ -381,6 +389,152 @@ func (inst *instance) collectIndirect(ctx context.Context) ([]ghaFinding, error)
 			}
 			res = append(res, f)
 		}
+	}
+	return res, nil
+}
+
+// sortedMods returns the recorded modules ordered by go.mod filename, for
+// deterministic iteration regardless of how passes were scheduled.
+func (inst *instance) sortedMods() []*modInfo {
+	inst.modsMu.Lock()
+	defer inst.modsMu.Unlock()
+	names := make([]string, 0, len(inst.mods))
+	for name := range inst.mods {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	mods := make([]*modInfo, 0, len(names))
+	for _, name := range names {
+		mods = append(mods, inst.mods[name])
+	}
+	return mods
+}
+
+// scorecardFetchConcurrency bounds the concurrent Scorecard API requests.
+const scorecardFetchConcurrency = 8
+
+// scorecardTarget associates a require entry with the repository whose
+// Scorecard result decides whether the entry is reported.
+type scorecardTarget struct {
+	mi      *modInfo
+	r       *modfile.Require
+	modV    module.Version
+	repoKey string // "host/owner/repo"
+}
+
+// collectScorecard implements the opt-in OpenSSF Scorecard check (enabled via
+// Opts.Scorecard): it iterates the require list of every recorded module —
+// covering direct and indirect dependencies alike, independently of the
+// trusted-project adoption check — and returns a finding for each module whose
+// repository has no Scorecard data or scores below Opts.ScorecardMinScore.
+// Modules marked trusted via directives, and modules whose path cannot be
+// mapped to a repository (vanity import paths), are skipped.
+func (inst *instance) collectScorecard(ctx context.Context) ([]ghaFinding, error) {
+	if inst.Opts.Scorecard == nil {
+		return nil, nil
+	}
+	// Gather the targets first, deduplicating modules (the same module may be
+	// required by several analyzed modules) and repositories (several modules,
+	// e.g. in a monorepo, may live in the same repository).
+	var targets []scorecardTarget
+	seenMods := make(map[string]struct{})
+	repos := make(map[string][3]string)
+	for _, mi := range inst.sortedMods() {
+		for _, r := range mi.goMod.Require {
+			modV := resolveReplace(mi.goMod, r.Mod)
+			if modV == nil {
+				continue
+			}
+			if mi.policies[modV.Path] == directivePolicyTrusted {
+				slog.DebugContext(ctx, "module marked as trusted via gosocialcheck:trusted directive", "path", modV.Path)
+				continue
+			}
+			if _, dup := seenMods[modV.String()]; dup {
+				continue
+			}
+			seenMods[modV.String()] = struct{}{}
+			host, owner, repo, ok := scorecard.RepoForModule(modV.Path)
+			if !ok {
+				slog.DebugContext(ctx, "cannot map module to a repository; skipping the Scorecard check", "path", modV.Path)
+				continue
+			}
+			repoKey := host + "/" + owner + "/" + repo
+			repos[repoKey] = [3]string{host, owner, repo}
+			targets = append(targets, scorecardTarget{mi: mi, r: r, modV: *modV, repoKey: repoKey})
+		}
+	}
+
+	// Fetch each unique repository once, concurrently. A repository without
+	// Scorecard data is recorded as nil; any other fetch error aborts.
+	results := make(map[string]*scorecard.Result, len(repos))
+	var resultsMu sync.Mutex
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(scorecardFetchConcurrency)
+	if len(repos) > 0 {
+		inst.progress(ctx, fmt.Sprintf("fetching OpenSSF Scorecard results for %d repositories", len(repos)))
+	}
+	for repoKey, hor := range repos {
+		g.Go(func() error {
+			res, err := inst.Opts.Scorecard.Get(gctx, hor[0], hor[1], hor[2])
+			if err != nil && !errors.Is(err, scorecard.ErrNotFound) {
+				return err
+			}
+			resultsMu.Lock()
+			results[repoKey] = res
+			resultsMu.Unlock()
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	var res []ghaFinding
+	for _, tgt := range targets {
+		result := results[tgt.repoKey]
+		var problem string
+		switch {
+		case result == nil:
+			problem = "no OpenSSF Scorecard data found for " + tgt.repoKey
+		case result.Score < inst.Opts.ScorecardMinScore:
+			problem = fmt.Sprintf("OpenSSF Scorecard score %.1f for %s is below the minimum %.1f",
+				result.Score, tgt.repoKey, inst.Opts.ScorecardMinScore)
+		default:
+			slog.DebugContext(ctx, "OpenSSF Scorecard score is acceptable",
+				"path", tgt.modV.Path, "repo", tgt.repoKey, "score", result.Score)
+			continue
+		}
+		kind := "dependency"
+		if tgt.r.Indirect {
+			kind = "indirect dependency"
+		}
+		msg := fmt.Sprintf("module '%s' (%s): %s (negligible if you trust the module)",
+			tgt.modV.String(), kind, problem)
+		f := ghaFinding{
+			msg: msg,
+			modPosn: token.Position{
+				Filename: tgt.mi.goModFilename,
+				Line:     requireLine(tgt.r),
+				Column:   1,
+			},
+		}
+		if inst.Opts.GHA {
+			goSumE := tgt.mi.goSum[tgt.modV.Path+" "+tgt.modV.Version]
+			if goSumE.Line == 0 {
+				slog.DebugContext(ctx, "no go.sum line for module; skipping GHA annotation", "path", tgt.modV.Path)
+				continue
+			}
+			f.sumPosn = token.Position{
+				Filename: tgt.mi.goSumFilename,
+				Line:     goSumE.Line,
+				Column:   1,
+			}
+			if changed, ok := inst.changedGoSumLines(ctx, tgt.mi.goSumFilename); ok {
+				f.changeSetKnown = true
+				_, f.changedInPR = changed[goSumE.Line]
+			}
+		}
+		res = append(res, f)
 	}
 	return res, nil
 }
