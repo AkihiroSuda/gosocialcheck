@@ -57,5 +57,11 @@ func action(cmd *cobra.Command, args []string) error {
 	if !s.Remote.LastUpdated.IsZero() {
 		fmt.Fprintf(w, "  Last updated: %s\n", s.Remote.LastUpdated.Format(time.RFC3339))
 	}
+	fmt.Fprintln(w, "Scorecard:")
+	fmt.Fprintf(w, "  Path:         %s\n", s.Scorecard.Dir)
+	fmt.Fprintf(w, "  Exists:       %t\n", s.Scorecard.Exists)
+	if !s.Scorecard.LastUpdated.IsZero() {
+		fmt.Fprintf(w, "  Last updated: %s\n", s.Scorecard.LastUpdated.Format(time.RFC3339))
+	}
 	return nil
 }

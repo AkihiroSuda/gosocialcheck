@@ -16,6 +16,7 @@ import (
 	"gotest.tools/v3/assert"
 
 	"github.com/AkihiroSuda/gosocialcheck/pkg/cache"
+	"github.com/AkihiroSuda/gosocialcheck/pkg/netutil/scorecard"
 )
 
 func captureStdout(t *testing.T, fn func()) string {
@@ -311,6 +312,130 @@ example.com/indirect-trusted-adopted v1.3.0 h1:adopted=
 		findings, err := inst.collectIndirect(context.Background())
 		assert.NilError(t, err)
 		assert.Equal(t, 0, len(findings))
+	})
+}
+
+type fakeScorecard struct {
+	// scores maps "host/owner/repo" to an aggregate score; missing entries
+	// behave like repositories not covered by Scorecard.
+	scores map[string]float64
+}
+
+func (f *fakeScorecard) Get(_ context.Context, host, owner, repo string) (*scorecard.Result, error) {
+	s, ok := f.scores[host+"/"+owner+"/"+repo]
+	if !ok {
+		return nil, scorecard.ErrNotFound
+	}
+	return &scorecard.Result{Score: s}, nil
+}
+
+func TestCollectScorecard(t *testing.T) {
+	const goModSrc = `module example.com/foo
+
+go 1.25.0
+
+require (
+	github.com/good/mod v1.0.0
+	github.com/bad/mod v1.1.0
+	github.com/unscored/mod v1.2.0
+	example.com/vanity v1.3.0
+)
+
+require github.com/bad/mod2 v1.4.0 // indirect
+`
+	goMod, err := modfile.Parse("go.mod", []byte(goModSrc), nil)
+	assert.NilError(t, err)
+
+	const goSumSrc = `github.com/good/mod v1.0.0 h1:good=
+github.com/bad/mod v1.1.0 h1:bad=
+github.com/unscored/mod v1.2.0 h1:unscored=
+example.com/vanity v1.3.0 h1:vanity=
+github.com/bad/mod2 v1.4.0 h1:bad2=
+`
+	goSum, err := parseGoSum(strings.NewReader(goSumSrc))
+	assert.NilError(t, err)
+
+	mi := &modInfo{
+		goModFilename: "/repo/go.mod",
+		goSumFilename: "/repo/go.sum",
+		goMod:         goMod,
+		goSum:         goSum,
+		policies:      map[string]string{},
+	}
+	sc := &fakeScorecard{scores: map[string]float64{
+		"github.com/good/mod": 9.0,
+		"github.com/bad/mod":  3.2,
+		"github.com/bad/mod2": 1.0,
+	}}
+
+	t.Run("disabled without Opts.Scorecard", func(t *testing.T) {
+		inst := newInstanceForTest(t, false, nil)
+		inst.recordModule(mi)
+		findings, err := inst.collectScorecard(context.Background())
+		assert.NilError(t, err)
+		assert.Equal(t, 0, len(findings))
+	})
+
+	t.Run("reports low and missing scores at go.mod lines", func(t *testing.T) {
+		inst := newInstanceForTest(t, false, nil)
+		inst.Opts.Scorecard = sc
+		inst.Opts.ScorecardMinScore = 5.0
+		inst.recordModule(mi)
+		findings, err := inst.collectScorecard(context.Background())
+		assert.NilError(t, err)
+		assert.Equal(t, 3, len(findings))
+		msgs := make(map[string]token.Position)
+		for _, f := range findings {
+			msgs[f.msg] = f.modPosn
+		}
+		var lowDirect, missing, lowIndirect string
+		for msg := range msgs {
+			switch {
+			case strings.Contains(msg, "github.com/bad/mod@v1.1.0"):
+				lowDirect = msg
+			case strings.Contains(msg, "github.com/unscored/mod@v1.2.0"):
+				missing = msg
+			case strings.Contains(msg, "github.com/bad/mod2@v1.4.0"):
+				lowIndirect = msg
+			}
+		}
+		assert.Assert(t, strings.Contains(lowDirect, "score 3.2"), "msg: %q", lowDirect)
+		assert.Assert(t, strings.Contains(lowDirect, "below the minimum 5.0"), "msg: %q", lowDirect)
+		assert.Assert(t, strings.Contains(lowDirect, "(dependency)"), "msg: %q", lowDirect)
+		assert.Assert(t, strings.Contains(missing, "no OpenSSF Scorecard data"), "msg: %q", missing)
+		assert.Assert(t, strings.Contains(lowIndirect, "(indirect dependency)"), "msg: %q", lowIndirect)
+		assert.Equal(t, 7, msgs[lowDirect].Line) // go.mod line of github.com/bad/mod
+		assert.Equal(t, "/repo/go.mod", msgs[lowDirect].Filename)
+	})
+
+	t.Run("trusted directive silences the check", func(t *testing.T) {
+		inst := newInstanceForTest(t, false, nil)
+		inst.Opts.Scorecard = sc
+		inst.Opts.ScorecardMinScore = 5.0
+		miTrusted := *mi
+		miTrusted.policies = map[string]string{
+			"github.com/bad/mod":      directivePolicyTrusted,
+			"github.com/bad/mod2":     directivePolicyTrusted,
+			"github.com/unscored/mod": directivePolicyTrusted,
+		}
+		inst.recordModule(&miTrusted)
+		findings, err := inst.collectScorecard(context.Background())
+		assert.NilError(t, err)
+		assert.Equal(t, 0, len(findings))
+	})
+
+	t.Run("gha annotates go.sum lines", func(t *testing.T) {
+		inst := newInstanceForTest(t, true, nil)
+		inst.Opts.Scorecard = sc
+		inst.Opts.ScorecardMinScore = 5.0
+		inst.recordModule(mi)
+		findings, err := inst.collectScorecard(context.Background())
+		assert.NilError(t, err)
+		assert.Equal(t, 3, len(findings))
+		for _, f := range findings {
+			assert.Equal(t, "/repo/go.sum", f.sumPosn.Filename)
+			assert.Assert(t, f.sumPosn.Line > 0)
+		}
 	})
 }
 

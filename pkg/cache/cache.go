@@ -259,6 +259,8 @@ type Status struct {
 	Mode   Mode         `json:"mode"`
 	Local  SubStatus    `json:"local"`
 	Remote RemoteStatus `json:"remote"`
+	// Scorecard is the cache of OpenSSF Scorecard results (--scorecard).
+	Scorecard SubStatus `json:"scorecard"`
 }
 
 // Status returns the current cache status.
@@ -274,6 +276,9 @@ func (c *Cache) Status() *Status {
 			},
 			URL: c.opts.remoteURL,
 		},
+		Scorecard: SubStatus{
+			Dir: c.ScorecardDir(),
+		},
 	}
 	if t, err := modTime(c.LocalDir()); err == nil {
 		s.Local.Exists = true
@@ -282,6 +287,10 @@ func (c *Cache) Status() *Status {
 	if t, err := modTime(c.RemoteDir()); err == nil {
 		s.Remote.Exists = true
 		s.Remote.LastUpdated = t
+	}
+	if t, err := modTime(c.ScorecardDir()); err == nil {
+		s.Scorecard.Exists = true
+		s.Scorecard.LastUpdated = t
 	}
 	return s
 }
