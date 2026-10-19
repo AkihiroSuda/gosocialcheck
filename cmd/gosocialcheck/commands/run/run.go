@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/tools/go/analysis"
@@ -34,6 +36,10 @@ func New() *cobra.Command {
 		"Check OpenSSF Scorecard scores of the dependencies (opt-in, as not every repo is covered by Scorecard)")
 	flags.Float64("scorecard-min-score", scorecard.DefaultMinScore,
 		"Minimum acceptable OpenSSF Scorecard score (0-10), for --scorecard")
+	flags.String("modfile", "",
+		"Use the specified file (e.g. vendor.mod) instead of go.mod, like \"go -modfile\". "+
+			"The corresponding go.sum is the file with the .mod suffix replaced by .sum (e.g. vendor.sum). "+
+			"Unlike \"go -modfile\", go.mod does not need to exist next to the file")
 	return cmd
 }
 
@@ -70,7 +76,11 @@ func action(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	goflags := flagutil.PFlagSetToGoFlagSet(flags, []string{"debug", "cache-mode", "gha", "scorecard", "scorecard-min-score"})
+	modFile, err := flags.GetString("modfile")
+	if err != nil {
+		return err
+	}
+	goflags := flagutil.PFlagSetToGoFlagSet(flags, []string{"debug", "cache-mode", "gha", "scorecard", "scorecard-min-score", "modfile"})
 	opts := analyzer.Opts{
 		Flags:      *goflags,
 		Cache:      c,
@@ -89,6 +99,11 @@ func action(cmd *cobra.Command, args []string) error {
 	pkgsCfg := &packages.Config{
 		Context: ctx,
 		Mode:    packages.LoadAllSyntax | packages.NeedModule,
+	}
+	if modFile != "" {
+		if err = configureModFile(pkgsCfg, modFile); err != nil {
+			return err
+		}
 	}
 	initial, err := packages.Load(pkgsCfg, args...)
 	if err != nil {
@@ -128,6 +143,33 @@ func action(cmd *cobra.Command, args []string) error {
 	}
 	if total := rootDiags + indirectDiags; total > 0 {
 		return fmt.Errorf("found %d diagnostic(s)", total)
+	}
+	return nil
+}
+
+// configureModFile configures pkgsCfg to load packages with `go -modfile=modFile`.
+//
+// `go -modfile` still requires go.mod to exist in the module root, so an empty
+// go.mod is overlaid next to modFile when it does not exist, for repositories
+// that only have e.g. vendor.mod and vendor.sum.
+func configureModFile(pkgsCfg *packages.Config, modFile string) error {
+	if !strings.HasSuffix(modFile, ".mod") {
+		return fmt.Errorf("--modfile=%s: file must have .mod extension", modFile)
+	}
+	modFile, err := filepath.Abs(modFile)
+	if err != nil {
+		return err
+	}
+	if _, err = os.Stat(modFile); err != nil {
+		return fmt.Errorf("--modfile: %w", err)
+	}
+	pkgsCfg.BuildFlags = append(pkgsCfg.BuildFlags, "-modfile="+modFile)
+	goMod := filepath.Join(filepath.Dir(modFile), "go.mod")
+	if _, err = os.Stat(goMod); errors.Is(err, os.ErrNotExist) {
+		slog.Debug("overlaying an empty go.mod for --modfile", "goMod", goMod, "modFile", modFile)
+		pkgsCfg.Overlay = map[string][]byte{goMod: {}}
+	} else if err != nil {
+		return err
 	}
 	return nil
 }

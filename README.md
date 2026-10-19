@@ -67,6 +67,20 @@ Only modules hosted on `github.com`, `gitlab.com`, and `golang.org/x` are checke
 modules with vanity import paths are skipped.
 `//gosocialcheck:trusted` directives (see below) silence this check too.
 
+### Alternative go.mod file
+
+Pass `--modfile` to read the module from a file other than `go.mod`, like `go -modfile`.
+The corresponding `go.sum` is the file with the `.mod` suffix replaced by `.sum`.
+Findings (including `--gha` annotations) point to these files, and `--gha` detects
+the changed lines of the `.sum` file in the PR.
+
+```bash
+gosocialcheck run --modfile=vendor.mod ./...
+```
+
+Unlike `go -modfile`, `go.mod` does not need to exist next to the file, so this
+also works for repositories that only have e.g. `vendor.mod` and `vendor.sum`.
+
 ### Allowlist
 
 Use `//gosocialcheck:trusted` [directives](https://github.com/AkihiroSuda/gomoddirectivecomments) in `go.mod` to silence alerts for trustworthy modules.

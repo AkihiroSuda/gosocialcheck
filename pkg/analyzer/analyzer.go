@@ -154,6 +154,13 @@ type ghaFinding struct {
 	changeSetKnown bool           // the pull request change set for the go.sum file was determinable
 }
 
+// goSumFilenameFor returns the go.sum filename that corresponds to
+// goModFilename, following the rule of `go -modfile`: "go.mod" maps to
+// "go.sum", and e.g. "vendor.mod" maps to "vendor.sum".
+func goSumFilenameFor(goModFilename string) string {
+	return strings.TrimSuffix(goModFilename, ".mod") + ".sum"
+}
+
 func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) {
 	return func(pass *analysis.Pass) (any, error) {
 		// TODO: cache go.mod
@@ -179,7 +186,7 @@ func run(ctx context.Context, inst *instance) func(*analysis.Pass) (any, error) 
 			return nil, fmt.Errorf("failed to parse gosocialcheck directives in %q: %w", goModFilename, err)
 		}
 		// TODO: cache go.sum
-		goSumFilename := filepath.Join(filepath.Dir(goModFilename), "go.sum")
+		goSumFilename := goSumFilenameFor(goModFilename)
 		// pass.ReadFile does not support go.sum
 		goSumB, err := os.ReadFile(goSumFilename)
 		if err != nil {
