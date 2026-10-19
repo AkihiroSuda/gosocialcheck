@@ -703,3 +703,20 @@ func TestIsLocalPath(t *testing.T) {
 		})
 	}
 }
+
+func TestGoSumFilenameFor(t *testing.T) {
+	tests := []struct {
+		goMod    string
+		expected string
+	}{
+		{"/src/go.mod", "/src/go.sum"},
+		{"/src/vendor.mod", "/src/vendor.sum"},
+		{"/src/foo.bar.mod", "/src/foo.bar.sum"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.goMod, func(t *testing.T) {
+			assert.Equal(t, tt.expected, goSumFilenameFor(tt.goMod))
+		})
+	}
+}
