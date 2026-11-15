@@ -40,6 +40,8 @@ Pass `--gha` to emit findings as
 [workflow commands](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands)
 so they show up as annotations ([up to 10](https://github.com/actions/toolkit/blob/main/docs/problem-matchers.md#limitations)) on the workflow run and any associated PR.
 In this mode the command always exits 0.
+The annotation paths are relative to `$GITHUB_WORKSPACE`, so the command can also be
+run in a subdirectory, e.g., for a nested module.
 
 To stay within GitHub's annotation limits, `--gha` caps the number of emitted
 annotations and reports findings whose `go.sum` line changed in the PR first. On

@@ -87,14 +87,20 @@ func (a *Analyzer) Flush(ctx context.Context) (int, error) {
 }
 
 func New(ctx context.Context, opts Opts) (*Analyzer, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil, err
+	// GitHub Actions resolves relative annotation paths against the workspace,
+	// not against the working directory of the step.
+	ghaRoot := os.Getenv("GITHUB_WORKSPACE")
+	if ghaRoot == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return nil, err
+		}
+		ghaRoot = cwd
 	}
 	inst := &instance{
 		Opts:                opts,
 		processedSums:       make(map[string]struct{}),
-		cwd:                 cwd,
+		ghaRoot:             ghaRoot,
 		changedSumLines:     make(map[string]map[int]struct{}),
 		changedSumLinesDone: make(map[string]bool),
 		mods:                make(map[string]*modInfo),
@@ -114,7 +120,7 @@ type instance struct {
 	Opts
 	processedSums   map[string]struct{}
 	processedSumsMu sync.RWMutex
-	cwd             string
+	ghaRoot         string // the directory that the annotation paths are relative to
 
 	// changedSumLines caches, per go.sum file, the set of 1-based line numbers
 	// added or modified in the current pull request. changedSumLinesDone records
@@ -603,7 +609,7 @@ func (inst *instance) flushGHA(ctx context.Context) {
 		shown = ghaMaxAnnotations
 	}
 	for _, f := range findings[:shown] {
-		emitGHAWarning(inst.cwd, f.sumPosn, f.sumPosn, f.msg)
+		emitGHAWarning(inst.ghaRoot, f.sumPosn, f.sumPosn, f.msg)
 	}
 	if shown < len(findings) {
 		slog.WarnContext(ctx, "suppressed findings to stay within the GitHub Actions annotation limit",
@@ -800,9 +806,9 @@ var (
 	)
 )
 
-func emitGHAWarning(cwd string, posn, endPosn token.Position, msg string) {
+func emitGHAWarning(root string, posn, endPosn token.Position, msg string) {
 	file := posn.Filename
-	if rel, err := filepath.Rel(cwd, file); err == nil {
+	if rel, err := filepath.Rel(root, file); err == nil {
 		file = rel
 	}
 	fmt.Printf("::warning file=%s,line=%d,col=%d,endLine=%d,endColumn=%d,title=%s::%s\n",
