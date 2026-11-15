@@ -16,7 +16,7 @@ require (
 require (
 	github.com/lmittmann/tint v1.2.1 // gomodjail:unconfined
 	github.com/spf13/cobra v1.10.2 // gomodjail:unconfined
-	github.com/spf13/pflag v1.0.10
+	github.com/spf13/pflag v1.1.0
 	gopkg.in/yaml.v3 v3.0.1
 	gotest.tools/v3 v3.5.2
 )
