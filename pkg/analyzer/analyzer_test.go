@@ -43,7 +43,7 @@ func TestFlushGHAPrioritizesAndCaps(t *testing.T) {
 	}
 
 	t.Run("only go.sum is annotated", func(t *testing.T) {
-		inst := &instance{Opts: Opts{GHA: true}, cwd: "/repo"}
+		inst := &instance{Opts: Opts{GHA: true}, ghaRoot: "/repo"}
 		inst.addGHAFinding(ghaFinding{msg: "m", sumPosn: sumPosn(3)})
 		out := captureStdout(t, func() { inst.flushGHA(context.Background()) })
 		lines := strings.Split(strings.TrimSpace(out), "\n")
@@ -52,8 +52,15 @@ func TestFlushGHAPrioritizesAndCaps(t *testing.T) {
 		assert.Assert(t, !strings.Contains(out, ".go,"), "must not annotate .go files: %q", out)
 	})
 
+	t.Run("go.sum of a nested module is annotated relative to the root", func(t *testing.T) {
+		inst := &instance{Opts: Opts{GHA: true}, ghaRoot: "/repo"}
+		inst.addGHAFinding(ghaFinding{msg: "m", sumPosn: token.Position{Filename: "/repo/api/go.sum", Line: 3, Column: 1}})
+		out := captureStdout(t, func() { inst.flushGHA(context.Background()) })
+		assert.Assert(t, strings.Contains(out, "file=api/go.sum,"), "must annotate api/go.sum: %q", out)
+	})
+
 	t.Run("changed-in-PR findings emitted first", func(t *testing.T) {
-		inst := &instance{Opts: Opts{GHA: true}, cwd: "/repo"}
+		inst := &instance{Opts: Opts{GHA: true}, ghaRoot: "/repo"}
 		inst.addGHAFinding(ghaFinding{msg: "other-finding", sumPosn: sumPosn(1)})
 		inst.addGHAFinding(ghaFinding{msg: "priority-finding", sumPosn: sumPosn(9), changedInPR: true})
 		out := captureStdout(t, func() { inst.flushGHA(context.Background()) })
@@ -64,7 +71,7 @@ func TestFlushGHAPrioritizesAndCaps(t *testing.T) {
 	})
 
 	t.Run("caps total annotations", func(t *testing.T) {
-		inst := &instance{Opts: Opts{GHA: true}, cwd: "/repo"}
+		inst := &instance{Opts: Opts{GHA: true}, ghaRoot: "/repo"}
 		for i := 0; i < 60; i++ {
 			inst.addGHAFinding(ghaFinding{msg: "m", sumPosn: sumPosn(i + 1)})
 		}
@@ -73,7 +80,7 @@ func TestFlushGHAPrioritizesAndCaps(t *testing.T) {
 	})
 
 	t.Run("changed-in-PR findings survive the cap", func(t *testing.T) {
-		inst := &instance{Opts: Opts{GHA: true}, cwd: "/repo"}
+		inst := &instance{Opts: Opts{GHA: true}, ghaRoot: "/repo"}
 		// Fill well past the cap with unchanged findings, then add one changed.
 		for i := 0; i < 60; i++ {
 			inst.addGHAFinding(ghaFinding{msg: "other-finding", sumPosn: sumPosn(i + 1)})
@@ -84,7 +91,7 @@ func TestFlushGHAPrioritizesAndCaps(t *testing.T) {
 	})
 
 	t.Run("drops untouched modules when the PR change set is known", func(t *testing.T) {
-		inst := &instance{Opts: Opts{GHA: true}, cwd: "/repo"}
+		inst := &instance{Opts: Opts{GHA: true}, ghaRoot: "/repo"}
 		// Known change set, but module not touched in the PR: must be dropped.
 		inst.addGHAFinding(ghaFinding{msg: "untouched-finding", sumPosn: sumPosn(1), changeSetKnown: true})
 		inst.addGHAFinding(ghaFinding{msg: "touched-finding", sumPosn: sumPosn(2), changeSetKnown: true, changedInPR: true})
@@ -96,7 +103,7 @@ func TestFlushGHAPrioritizesAndCaps(t *testing.T) {
 	})
 
 	t.Run("keeps findings when the change set is unknown", func(t *testing.T) {
-		inst := &instance{Opts: Opts{GHA: true}, cwd: "/repo"}
+		inst := &instance{Opts: Opts{GHA: true}, ghaRoot: "/repo"}
 		// Change set could not be determined (e.g. push event): keep the finding.
 		inst.addGHAFinding(ghaFinding{msg: "unknown-finding", sumPosn: sumPosn(1)})
 		out := captureStdout(t, func() { inst.flushGHA(context.Background()) })
